@@ -4,7 +4,6 @@ import os
 import logging
 import datetime
 from typing import Dict, List, Optional, Tuple
-from pypushdeer import PushDeer
 
 def beijing_time_converter(timestamp):
     utc_dt = datetime.datetime.fromtimestamp(timestamp, tz=datetime.timezone.utc)
@@ -21,9 +20,8 @@ for handler in root_logger.handlers:
 
 logger = logging.getLogger(__name__)
 
-
 # ENVIRONMENT
-ENV_PUSH_KEY = "PUSHDEER_SENDKEY"
+ENV_PUSH_KEY = "PUSH_PLUS_TOKEN"
 ENV_COOKIES = "GLADOS_COOKIES"
 ENV_EXCHANGE_PLAN = "GLADOS_EXCHANGE_PLAN"
 
@@ -34,7 +32,7 @@ POINTS_URL = "https://glados.cloud/api/user/points"
 EXCHANGE_URL = "https://glados.cloud/api/user/exchange"
 
 # POST DATA
-CHECKIN_DATA = {"token": "glados.cloud"} 
+CHECKIN_DATA = {"token": "glados.cloud"}
 
 # Request Headers
 HEADERS_TEMPLATE = {
@@ -45,7 +43,7 @@ HEADERS_TEMPLATE = {
 }
 
 # Exchange Plan Points
-EXCHANGE_POINTS = {"plan100": 100, "plan200": 200, "plan500": 500} 
+EXCHANGE_POINTS = {"plan100": 100, "plan200": 200, "plan500": 500}
 
 def load_config() -> Tuple[str, List[str], str]:
     push_key_env = os.environ.get(ENV_PUSH_KEY)
@@ -69,14 +67,13 @@ def load_config() -> Tuple[str, List[str], str]:
     if not exchange_plan_env:
         logger.warning(f"环境变量 '{ENV_EXCHANGE_PLAN}' 未设置，将使用默认兑换计划 'plan500'。")
         exchange_plan = "plan500"
-    else: 
+    else:
         if exchange_plan_env in EXCHANGE_POINTS:
-             exchange_plan = exchange_plan_env
-             logger.info(f"使用指定的兑换计划: {exchange_plan}")
+            exchange_plan = exchange_plan_env
+            logger.info(f"使用指定的兑换计划: {exchange_plan}")
         else:
             logger.warning(f"环境变量 '{ENV_EXCHANGE_PLAN}' 的值 '{exchange_plan_env}' 无效，将使用默认兑换计划 'plan500'。")
             exchange_plan = "plan500"
-
 
     logger.info(f"共加载了 {len(cookies_list)} 个 Cookie 用于签到。")
     logger.info(f"当前 {ENV_PUSH_KEY} {'已设置' if push_key_env else '未设置'}。")
@@ -84,9 +81,7 @@ def load_config() -> Tuple[str, List[str], str]:
 
     return push_key, cookies_list, exchange_plan
 
-
 def make_request(url: str, method: str, headers: Dict[str, str], data: Optional[Dict] = None, cookies: str = "") -> Optional[requests.Response]:
-
     session_headers = headers.copy()
     session_headers['cookie'] = cookies
 
@@ -107,9 +102,7 @@ def make_request(url: str, method: str, headers: Dict[str, str], data: Optional[
         logger.error(f"向 {url} 发起请求时发生网络错误: {e}")
         return None
 
-
 def checkin_and_process(cookie: str, exchange_plan: str) -> Tuple[str, str, str, str, str]:
-
     status_msg = "签到请求失败"
     points_gained = "0"
     remaining_days = "获取剩余天数失败"
@@ -179,7 +172,7 @@ def checkin_and_process(cookie: str, exchange_plan: str) -> Tuple[str, str, str,
     except (ValueError, TypeError):
         logger.warning(f"无法解析当前积分数值，可能影响兑换判断: {remaining_points}")
 
-    required_points = EXCHANGE_POINTS.get(exchange_plan, 500) 
+    required_points = EXCHANGE_POINTS.get(exchange_plan, 500)
     if current_points_numeric >= required_points:
         logger.info(f"开始兑换 {exchange_plan} 计划 (需要 {required_points} 积分)")
         exchange_response = make_request(EXCHANGE_URL, 'POST', HEADERS_TEMPLATE, {"planType": exchange_plan}, cookies=cookie)
@@ -203,9 +196,7 @@ def checkin_and_process(cookie: str, exchange_plan: str) -> Tuple[str, str, str,
 
     return status_msg, points_gained, remaining_days, remaining_points, exchange_msg
 
-
 def format_push_content(results: List[Dict[str, str]]) -> Tuple[str, str]:
-
     success_count = sum(1 for r in results if "成功" in r['status'])
     fail_count = sum(1 for r in results if "失败" in r['status'] or "失败" in r['exchange'])
     repeat_count = sum(1 for r in results if "重复" in r['status'])
@@ -228,6 +219,32 @@ def format_push_content(results: List[Dict[str, str]]) -> Tuple[str, str]:
     content = "\n".join(content_lines)
     return title, content
 
+def send_pushplus(token: str, title: str, content: str) -> None:
+    safe_title = str(title).replace("\r", " ").replace("\n", " ").strip()
+    if not safe_title:
+        safe_title = "GLaDOS 签到通知"
+
+    data = {
+        "token": token,
+        "title": safe_title,
+        "content": str(content),
+        "template": "txt"
+    }
+
+    response = requests.post(
+        "https://www.pushplus.plus/send",
+        json=data,
+        timeout=15
+    )
+
+    logger.info(f"PushPlus 状态码: {response.status_code}")
+    logger.info(f"PushPlus 返回: {response.text}")
+
+    response.raise_for_status()
+
+    result = response.json()
+    if result.get("code") != 200:
+        raise Exception(f"PushPlus 推送失败: {result}")
 
 def main():
     try:
@@ -261,12 +278,10 @@ def main():
         logger.info(f"未设置 '{ENV_PUSH_KEY}'，跳过推送通知。")
     else:
         try:
-            pushdeer = PushDeer(pushkey=push_key)
-            pushdeer.send_text(title, desp=content)
-            logger.info("推送通知发送成功。")
+            send_pushplus(push_key, title, content)
+            logger.info("PushPlus 推送通知发送成功。")
         except Exception as e:
-            logger.error(f"发送推送通知失败: {e}")
-
+            logger.error(f"发送 PushPlus 推送通知失败: {e}")
 
 if __name__ == '__main__':
     main()
