@@ -2,6 +2,7 @@ import requests
 import json
 import os
 import logging
+import sys
 import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -24,6 +25,8 @@ logger = logging.getLogger(__name__)
 ENV_PUSH_KEY = "PUSH_PLUS_TOKEN"
 ENV_COOKIES = "GLADOS_COOKIES"
 ENV_EXCHANGE_PLAN = "GLADOS_EXCHANGE_PLAN"
+# 可选：手动指定起始 UA。不配就走下面的默认 + 设备自适应
+ENV_USER_AGENT = "GLADOS_USER_AGENT"
 
 # API URLs
 CHECKIN_URL = "https://glados.cloud/api/user/checkin"
@@ -34,13 +37,51 @@ EXCHANGE_URL = "https://glados.cloud/api/user/exchange"
 # POST DATA
 CHECKIN_DATA = {"token": "glados.cloud"}
 
-# Request Headers
-HEADERS_TEMPLATE = {
-    'referer': 'https://glados.cloud/console/checkin',
-    'origin': "https://glados.cloud",
-    'user-agent': "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/102.0.0.0 Safari/537.36",
-    'content-type': 'application/json;charset=UTF-8'
+# ---------------------------------------------------------------------------
+# 设备平台 UA 表
+#   GLaDOS 从 2026-09 起会校验「签到请求声明的平台」与「账号登录设备的平台」是否一致，
+#   对不上就返回 code 4 / reason=device-mismatch（Automated check-in detected），
+#   表现为一直签到失败，但积分接口照常返回，很容易误判成 Cookie 坏了。
+#   服务端会在响应里给出 loginDevice，照着切一次对应平台的 UA 就能恢复。
+# ---------------------------------------------------------------------------
+PLATFORM_UA = {
+    "Windows": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "macOS": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Linux": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "iPhone": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+    "Android": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
 }
+# 起始 UA：优先用 GLADOS_USER_AGENT（填你登录那个浏览器的 navigator.userAgent），
+# 没配则用 Windows，随后靠上面的设备自适应自动纠正。
+DEFAULT_UA = (os.environ.get(ENV_USER_AGENT) or "").strip() or PLATFORM_UA["Windows"]
+
+# 本次运行里学到「哪个平台的 UA 能用」，同一次运行内后续请求复用它
+_device_ua_cache: Dict[str, str] = {}
+
+# 签到状态码（以服务端为准，不要靠匹配 message 文本）
+CODE_SUCCESS = 0     # 签到成功
+CODE_REPEAT = 1      # 今日已签到
+CODE_DEVICE = 4      # 被判定为自动签到（设备平台不一致）
+CODE_AUTH = -2       # Cookie 无效/过期
+
+
+def build_headers(user_agent: str) -> Dict[str, str]:
+    """构造请求头。
+
+    注意：这里**故意不发 referer**。glados.cloud/console 页面带
+    <meta name="referrer" content="no-referrer">，真实浏览器点「签到」时不会带 Referer，
+    自己造一个反而是「不像本人浏览器点的」的破绽。
+    """
+    return {
+        'origin': "https://glados.cloud",
+        'accept': "application/json, text/plain, */*",
+        'user-agent': user_agent,
+        'content-type': 'application/json;charset=UTF-8',
+    }
+
+
+# Request Headers（其余接口沿用，签到请求会按平台动态换 UA）
+HEADERS_TEMPLATE = build_headers(DEFAULT_UA)
 
 # Exchange Plan Points
 EXCHANGE_POINTS = {"plan100": 100, "plan200": 200, "plan500": 500}
@@ -87,9 +128,9 @@ def make_request(url: str, method: str, headers: Dict[str, str], data: Optional[
 
     try:
         if method.upper() == 'POST':
-            response = requests.post(url, headers=session_headers, data=json.dumps(data))
+            response = requests.post(url, headers=session_headers, data=json.dumps(data), timeout=30)
         elif method.upper() == 'GET':
-            response = requests.get(url, headers=session_headers)
+            response = requests.get(url, headers=session_headers, timeout=30)
         else:
             logger.error(f"不支持的 HTTP 方法: {method}")
             return None
@@ -102,33 +143,104 @@ def make_request(url: str, method: str, headers: Dict[str, str], data: Optional[
         logger.error(f"向 {url} 发起请求时发生网络错误: {e}")
         return None
 
-def checkin_and_process(cookie: str, exchange_plan: str) -> Tuple[str, str, str, str, str]:
+
+def checkin_request(cookie: str, user_agent: str) -> Optional[Dict]:
+    """发一次签到请求，返回解析后的响应体（失败返回 None）"""
+    response = make_request(CHECKIN_URL, 'POST', build_headers(user_agent), CHECKIN_DATA, cookies=cookie)
+    if not response:
+        return None
+    try:
+        return response.json()
+    except json.JSONDecodeError:
+        logger.error(f"解析签到响应 JSON 失败: {response.text}")
+        return None
+
+
+def do_checkin(cookie: str) -> Tuple[Optional[Dict], str]:
+    """签到（含设备平台自适应重试）。
+
+    返回 (响应体, 使用的 UA)。返回 None 表示请求层面就失败了。
+
+    流程：先用上次成功的 UA（没有就用默认）签到；若被判定为自动签到
+    （code 4 + reason=device-mismatch），读出服务端给的 loginDevice，
+    切到对应平台的 UA 再试一次。这是 GLaDOS 2026-09 之后的标准解法。
+    """
+    start_ua = _device_ua_cache.get("_last") or DEFAULT_UA
+
+    raw = checkin_request(cookie, start_ua)
+    if raw is None:
+        return None, start_ua
+
+    if raw.get("code") == CODE_DEVICE and raw.get("reason") == "device-mismatch":
+        login_device = raw.get("loginDevice")
+        recover_ua = _device_ua_cache.get(login_device) or PLATFORM_UA.get(login_device)
+        if recover_ua and recover_ua != start_ua:
+            logger.warning(
+                f"设备平台不匹配 (loginDevice={login_device}, "
+                f"currentDevice={raw.get('currentDevice')})，切换 UA 重试"
+            )
+            raw = checkin_request(cookie, recover_ua)
+            if raw is not None:
+                return raw, recover_ua
+            return None, recover_ua
+        logger.error(
+            f"被判定为自动签到，但无法自动恢复：loginDevice={login_device} 不在已知平台表里，"
+            f"或与当前 UA 相同。请重新登录 glados.cloud 手动签到一次并刷新 Cookie。"
+        )
+
+    return raw, start_ua
+
+
+def checkin_and_process(cookie: str, exchange_plan: str) -> Tuple[str, str, str, str, str, str]:
+    """返回 (状态, 本次积分, 剩余天数, 剩余积分, 兑换结果, 结果码)
+
+    结果码：OK / REPEAT / AUTH / DEVICE / FAIL，供 main() 决定退出码。
+    """
     status_msg = "签到请求失败"
     points_gained = "0"
     remaining_days = "获取剩余天数失败"
     remaining_points = "获取剩余积分失败"
     exchange_msg = "兑换跳过或失败"
+    result_code = "FAIL"
 
-    checkin_response = make_request(CHECKIN_URL, 'POST', HEADERS_TEMPLATE, CHECKIN_DATA, cookies=cookie)
-    if not checkin_response:
-        return status_msg, points_gained, remaining_days, remaining_points, exchange_msg
+    raw, used_ua = do_checkin(cookie)
+    if raw is None:
+        return status_msg, points_gained, remaining_days, remaining_points, exchange_msg, result_code
 
-    try:
-        checkin_data = checkin_response.json()
-        response_message = checkin_data.get('message', '无消息字段')
-        points_gained = str(checkin_data.get('points', 0))
+    code = raw.get("code", -99)
+    message = raw.get("message", "无消息字段")
+    points_gained = str(raw.get("points", 0))
 
-        if "Checkin! Got" in response_message:
-            status_msg = f"签到成功，获得 {points_gained} 积分"
-        elif "Checkin Repeats!" in response_message:
-            status_msg = "重复签到，明天再来"
-            points_gained = "0"
-        else:
-            status_msg = f"签到失败: {response_message}"
-            points_gained = "0"
-    except json.JSONDecodeError:
-        logger.error(f"解析签到响应 JSON 失败: {checkin_response.text}")
-        return status_msg, points_gained, remaining_days, remaining_points, exchange_msg
+    if code == CODE_SUCCESS:
+        status_msg = f"签到成功，获得 {points_gained} 积分"
+        result_code = "OK"
+        _device_ua_cache["_last"] = used_ua
+        logger.info(f"签到成功 (code {code}, points {points_gained}, UA={used_ua})")
+    elif code == CODE_REPEAT:
+        status_msg = "重复签到，明天再来"
+        points_gained = "0"
+        result_code = "REPEAT"
+        _device_ua_cache["_last"] = used_ua
+        logger.info(f"重复签到 (code {code})")
+    elif code == CODE_DEVICE:
+        status_msg = f"被判定为自动签到，签到失败: {message}"
+        points_gained = "0"
+        result_code = "DEVICE"
+        logger.error(
+            f"签到被判定为自动签到 (code 4, message: {message})。"
+            f"服务端给的 loginDevice={raw.get('loginDevice')}, currentDevice={raw.get('currentDevice')}；"
+            f"本次使用的 UA 是 {used_ua}。若自动切换 UA 仍失败，"
+            f"请重新登录 glados.cloud 手动签到一次并刷新 GLADOS_COOKIES。"
+        )
+    elif code == CODE_AUTH:
+        status_msg = f"认证失败，Cookie 无效或已过期: {message}"
+        points_gained = "0"
+        result_code = "AUTH"
+        logger.error(f"认证失败 (code -2)，Cookie 无效、已过期或不完整（注意 gld:sess.sig 要一起复制）")
+    else:
+        status_msg = f"签到失败: {message}"
+        points_gained = "0"
+        result_code = "FAIL"
 
     status_response = make_request(STATUS_URL, 'GET', HEADERS_TEMPLATE, cookies=cookie)
     if status_response:
@@ -143,11 +255,12 @@ def checkin_and_process(cookie: str, exchange_plan: str) -> Tuple[str, str, str,
             logger.error(f"解析状态响应 JSON 失败: {status_response.text}")
             remaining_days = "获取剩余天数失败 (JSON解析错误)"
         except (ValueError, TypeError):
-            logger.error(f"解析剩余天数时出错: {status_data.get('data', {}).get('leftDays', 'unknown')}")
             remaining_days = "获取剩余天数失败 (数值转换错误)"
     else:
         remaining_days = "获取剩余天数失败 (HTTP请求失败)"
 
+    # 注意：points_data 在这里先初始化，避免积分接口失败时下面引用未定义变量
+    points_data: Dict = {}
     points_response = make_request(POINTS_URL, 'GET', HEADERS_TEMPLATE, cookies=cookie)
     if points_response:
         try:
@@ -161,7 +274,6 @@ def checkin_and_process(cookie: str, exchange_plan: str) -> Tuple[str, str, str,
             logger.error(f"解析积分响应 JSON 失败: {points_response.text}")
             remaining_points = "获取剩余积分失败 (JSON解析错误)"
         except (ValueError, TypeError):
-            logger.error(f"解析剩余积分时出错: {points_data.get('points', 'unknown')}")
             remaining_points = "获取剩余积分失败 (数值转换错误)"
     else:
         remaining_points = "获取剩余积分失败 (HTTP请求失败)"
@@ -179,12 +291,12 @@ def checkin_and_process(cookie: str, exchange_plan: str) -> Tuple[str, str, str,
         if exchange_response:
             try:
                 exchange_data = exchange_response.json()
-                code = exchange_data.get('code', -1)
-                if code == 0:
+                ex_code = exchange_data.get('code', -1)
+                if ex_code == 0:
                     exchange_msg = f"兑换成功：{exchange_plan}"
                 else:
                     detailed_msg = exchange_data.get('message', "未知错误")
-                    exchange_msg = f"兑换失败: {exchange_plan}, 错误代码: {code}, 详情: {detailed_msg}"
+                    exchange_msg = f"兑换失败: {exchange_plan}, 错误代码: {ex_code}, 详情: {detailed_msg}"
             except json.JSONDecodeError:
                 logger.error(f"解析兑换响应 JSON 失败: {exchange_response.text}")
                 exchange_msg = f"兑换响应解析失败: {exchange_plan}"
@@ -194,14 +306,13 @@ def checkin_and_process(cookie: str, exchange_plan: str) -> Tuple[str, str, str,
         logger.info(f"积分不足以兑换 {exchange_plan}。所需: {required_points}, 当前: {current_points_numeric}")
         exchange_msg = f"积分不足，未兑换: {exchange_plan}"
 
-    return status_msg, points_gained, remaining_days, remaining_points, exchange_msg
+    return status_msg, points_gained, remaining_days, remaining_points, exchange_msg, result_code
 
 def format_push_content(results: List[Dict[str, str]]) -> Tuple[str, str]:
-    success_count = sum(1 for r in results if "成功" in r['status'])
-    fail_count = sum(1 for r in results if "失败" in r['status'] or "失败" in r['exchange'])
-    repeat_count = sum(1 for r in results if "重复" in r['status'])
+    success_count = sum(1 for r in results if r['result_code'] in ("OK", "REPEAT"))
+    fail_count = sum(1 for r in results if r['result_code'] not in ("OK", "REPEAT"))
 
-    title = f'GLaDOS 签到, 成功{success_count}, 失败{fail_count}, 重复{repeat_count}'
+    title = f'GLaDOS 签到, 成功{success_count}, 失败{fail_count}'
 
     content_lines = []
     for i, res in enumerate(results, 1):
@@ -246,24 +357,39 @@ def send_pushplus(token: str, title: str, content: str) -> None:
     if result.get("code") != 200:
         raise Exception(f"PushPlus 推送失败: {result}")
 
-def main():
+def main() -> int:
+    """返回退出码：0 = 签到成功/已签到；1 = 签到失败；2 = 配置错误。
+
+    有了退出码，Action 才会在失败时变红并给你发 GitHub 失败邮件 ——
+    否则脚本永远退 0，签失败了你也看不见。
+    """
+    push_key = ""
+    results: List[Dict[str, str]] = []
+    config_error = False
+
     try:
         push_key, cookies_list, exchange_plan = load_config()
 
         if not cookies_list:
             logger.error("未找到有效的 Cookie，退出程序。")
             title, content = "# 未找到 cookies!", ""
+            config_error = True
         else:
-            results = []
+            if os.environ.get(ENV_USER_AGENT, "").strip():
+                logger.info(f"起始 User-Agent: 使用 {ENV_USER_AGENT} 指定的值")
+            else:
+                logger.info(f"起始 User-Agent: 内置 {DEFAULT_UA.split(') ')[0]}) "
+                            f"（可用 {ENV_USER_AGENT} 覆盖为登录浏览器的 UA）")
             for idx, cookie in enumerate(cookies_list, 1):
                 logger.info(f"正在处理第 {idx} 个账户...")
-                status, points, days, points_total, exchange = checkin_and_process(cookie, exchange_plan)
+                status, points, days, points_total, exchange, rcode = checkin_and_process(cookie, exchange_plan)
                 results.append({
                     'status': status,
                     'points': points,
                     'days': days,
                     'points_total': points_total,
-                    'exchange': exchange
+                    'exchange': exchange,
+                    'result_code': rcode,
                 })
 
             title, content = format_push_content(results)
@@ -273,6 +399,7 @@ def main():
     except Exception as e:
         logger.error(f"主程序执行过程中发生未预期的错误: {e}")
         title, content = "# 脚本执行出错", str(e)
+        config_error = True
 
     if not push_key:
         logger.info(f"未设置 '{ENV_PUSH_KEY}'，跳过推送通知。")
@@ -283,5 +410,18 @@ def main():
         except Exception as e:
             logger.error(f"发送 PushPlus 推送通知失败: {e}")
 
+    if config_error:
+        logger.error("签到完成 (退出码 2)")
+        return 2
+
+    all_ok = bool(results) and all(r['result_code'] in ("OK", "REPEAT") for r in results)
+    if all_ok:
+        logger.info("签到完成 (退出码 0)")
+        return 0
+
+    logger.error("签到失败 (退出码 1)")
+    return 1
+
+
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
