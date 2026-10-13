@@ -86,7 +86,10 @@ HEADERS_TEMPLATE = build_headers(DEFAULT_UA)
 # Exchange Plan Points
 EXCHANGE_POINTS = {"plan100": 100, "plan200": 200, "plan500": 500}
 
-def load_config() -> Tuple[str, List[str], str]:
+# 明确表示「关闭自动兑换」的取值（不区分大小写）。留空 / 不设置同样视为关闭。
+EXCHANGE_DISABLED_VALUES = {"", "none", "off", "false", "no", "0", "disable", "disabled"}
+
+def load_config() -> Tuple[str, List[str], Optional[str]]:
     push_key_env = os.environ.get(ENV_PUSH_KEY)
     raw_cookies_env = os.environ.get(ENV_COOKIES)
     exchange_plan_env = os.environ.get(ENV_EXCHANGE_PLAN)
@@ -105,20 +108,28 @@ def load_config() -> Tuple[str, List[str], str]:
         if not cookies_list:
             raise ValueError(f"环境变量 '{ENV_COOKIES}' 已设置，但未包含任何有效的 Cookie。")
 
-    if not exchange_plan_env:
-        logger.warning(f"环境变量 '{ENV_EXCHANGE_PLAN}' 未设置，将使用默认兑换计划 'plan500'。")
-        exchange_plan = "plan500"
-    else:
-        if exchange_plan_env in EXCHANGE_POINTS:
-            exchange_plan = exchange_plan_env
-            logger.info(f"使用指定的兑换计划: {exchange_plan}")
+    # 自动兑换：默认关闭。只有把 GLADOS_EXCHANGE_PLAN 显式设成 plan100/plan200/plan500 才启用。
+    # 说明：积分攒着不会浪费，兑换比例是固定的（500 分 = 100 天），需要时才开就来得及。
+    raw_plan = (exchange_plan_env or "").strip()
+    if raw_plan.lower() in EXCHANGE_DISABLED_VALUES:
+        exchange_plan = None
+        if exchange_plan_env:
+            logger.info(f"环境变量 '{ENV_EXCHANGE_PLAN}' = '{exchange_plan_env}'，自动兑换已关闭。")
         else:
-            logger.warning(f"环境变量 '{ENV_EXCHANGE_PLAN}' 的值 '{exchange_plan_env}' 无效，将使用默认兑换计划 'plan500'。")
-            exchange_plan = "plan500"
+            logger.info(f"环境变量 '{ENV_EXCHANGE_PLAN}' 未设置，自动兑换已关闭（默认行为）。")
+    elif raw_plan.lower() in EXCHANGE_POINTS:
+        exchange_plan = raw_plan.lower()
+        logger.info(f"使用指定的兑换计划: {exchange_plan}")
+    else:
+        exchange_plan = None
+        logger.warning(
+            f"环境变量 '{ENV_EXCHANGE_PLAN}' 的值 '{exchange_plan_env}' 无效，已关闭自动兑换。"
+            f"可选值: {', '.join(EXCHANGE_POINTS)}，或 off/none 显式关闭。"
+        )
 
     logger.info(f"共加载了 {len(cookies_list)} 个 Cookie 用于签到。")
     logger.info(f"当前 {ENV_PUSH_KEY} {'已设置' if push_key_env else '未设置'}。")
-    logger.info(f"当前 {ENV_EXCHANGE_PLAN}: {exchange_plan}。")
+    logger.info(f"当前 {ENV_EXCHANGE_PLAN}: {exchange_plan or '关闭（不自动兑换）'}。")
 
     return push_key, cookies_list, exchange_plan
 
@@ -191,7 +202,7 @@ def do_checkin(cookie: str) -> Tuple[Optional[Dict], str]:
     return raw, start_ua
 
 
-def checkin_and_process(cookie: str, exchange_plan: str) -> Tuple[str, str, str, str, str, str]:
+def checkin_and_process(cookie: str, exchange_plan: Optional[str]) -> Tuple[str, str, str, str, str, str]:
     """返回 (状态, 本次积分, 剩余天数, 剩余积分, 兑换结果, 结果码)
 
     结果码：OK / REPEAT / AUTH / DEVICE / FAIL，供 main() 决定退出码。
@@ -284,27 +295,34 @@ def checkin_and_process(cookie: str, exchange_plan: str) -> Tuple[str, str, str,
     except (ValueError, TypeError):
         logger.warning(f"无法解析当前积分数值，可能影响兑换判断: {remaining_points}")
 
-    required_points = EXCHANGE_POINTS.get(exchange_plan, 500)
-    if current_points_numeric >= required_points:
-        logger.info(f"开始兑换 {exchange_plan} 计划 (需要 {required_points} 积分)")
-        exchange_response = make_request(EXCHANGE_URL, 'POST', HEADERS_TEMPLATE, {"planType": exchange_plan}, cookies=cookie)
-        if exchange_response:
-            try:
-                exchange_data = exchange_response.json()
-                ex_code = exchange_data.get('code', -1)
-                if ex_code == 0:
-                    exchange_msg = f"兑换成功：{exchange_plan}"
-                else:
-                    detailed_msg = exchange_data.get('message', "未知错误")
-                    exchange_msg = f"兑换失败: {exchange_plan}, 错误代码: {ex_code}, 详情: {detailed_msg}"
-            except json.JSONDecodeError:
-                logger.error(f"解析兑换响应 JSON 失败: {exchange_response.text}")
-                exchange_msg = f"兑换响应解析失败: {exchange_plan}"
-        else:
-            exchange_msg = f"兑换请求失败：{exchange_plan}"
+    if exchange_plan is None:
+        exchange_msg = "自动兑换已关闭"
+        logger.info(
+            f"当前积分 {current_points_numeric}；自动兑换已关闭，跳过兑换。"
+            f"需要启用时把 GitHub Secret `{ENV_EXCHANGE_PLAN}` 设为 plan100/plan200/plan500 即可。"
+        )
     else:
-        logger.info(f"积分不足以兑换 {exchange_plan}。所需: {required_points}, 当前: {current_points_numeric}")
-        exchange_msg = f"积分不足，未兑换: {exchange_plan}"
+        required_points = EXCHANGE_POINTS.get(exchange_plan, 500)
+        if current_points_numeric >= required_points:
+            logger.info(f"开始兑换 {exchange_plan} 计划 (需要 {required_points} 积分)")
+            exchange_response = make_request(EXCHANGE_URL, 'POST', HEADERS_TEMPLATE, {"planType": exchange_plan}, cookies=cookie)
+            if exchange_response:
+                try:
+                    exchange_data = exchange_response.json()
+                    ex_code = exchange_data.get('code', -1)
+                    if ex_code == 0:
+                        exchange_msg = f"兑换成功：{exchange_plan}"
+                    else:
+                        detailed_msg = exchange_data.get('message', "未知错误")
+                        exchange_msg = f"兑换失败: {exchange_plan}, 错误代码: {ex_code}, 详情: {detailed_msg}"
+                except json.JSONDecodeError:
+                    logger.error(f"解析兑换响应 JSON 失败: {exchange_response.text}")
+                    exchange_msg = f"兑换响应解析失败: {exchange_plan}"
+            else:
+                exchange_msg = f"兑换请求失败：{exchange_plan}"
+        else:
+            logger.info(f"积分不足以兑换 {exchange_plan}。所需: {required_points}, 当前: {current_points_numeric}")
+            exchange_msg = f"积分不足，未兑换: {exchange_plan}"
 
     return status_msg, points_gained, remaining_days, remaining_points, exchange_msg, result_code
 
