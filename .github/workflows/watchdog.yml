@@ -1,0 +1,116 @@
+name: glados watchdog
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_check:
+        description: '测试用：忽略「今天已签到成功」的判断，强制走一遍决策逻辑'
+        type: boolean
+        default: false
+      dry_run:
+        description: '测试用：只打印将要执行的动作，不真正触发签到'
+        type: boolean
+        default: false
+  schedule:
+    # 北京时间 11:00 - 22:00，每小时一次（UTC 03:00 - 14:00）
+    # 主任务 gladosCheck.yml 在 UTC 00:40（北京 08:40）触发，实测 GitHub schedule
+    # 有 0.5-2 小时延迟，这里从 11:00 开始检查，留足余量。
+    # 只有当「今天还没有签到成功记录」时才会兜底触发主任务，平时完全静默。
+    - cron: '0 3-14 * * *'
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: glados-watchdog
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: glados guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Decide whether a rescue run is needed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          FORCE_CHECK: ${{ github.event.inputs.force_check || 'false' }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          TZ: Asia/Shanghai
+          MAX_ATTEMPTS: '3'
+        run: |
+          set -uo pipefail
+
+          today=$(date +%F)
+          echo "北京时间今天: $today"
+          echo "force_check=$FORCE_CHECK dry_run=$DRY_RUN"
+
+          # 主任务若被 GitHub 因仓库长期无活动自动禁用，这里顺手启用（幂等）
+          gh workflow enable gladosCheck.yml --repo "$REPO" >/dev/null 2>&1 \
+            && echo "已确认 gladosCheck.yml 处于启用状态" \
+            || echo "::warning::启用 gladosCheck.yml 失败，请检查权限"
+
+          gh run list --repo "$REPO" --workflow gladosCheck.yml --limit 50 \
+            --json createdAt,status,conclusion > /tmp/main-runs.json
+
+          ok=0; pending=0; total=0
+          while read -r created status conclusion; do
+            [ -n "$created" ] || continue
+            d=$(date -d "$created" +%F 2>/dev/null) || continue
+            [ "$d" = "$today" ] || continue
+            total=$((total + 1))
+            [ "$conclusion" = "success" ] && ok=$((ok + 1))
+            case "$status" in
+              queued|in_progress|requested|waiting|pending) pending=$((pending + 1)) ;;
+            esac
+          done < <(jq -r '.[] | "\(.createdAt) \(.status) \(.conclusion)"' /tmp/main-runs.json)
+
+          echo "今天主任务运行: 总计 $total / 成功 $ok / 进行中 $pending"
+
+          if [ "$FORCE_CHECK" != "true" ]; then
+            if [ "$pending" -gt 0 ]; then
+              echo "::notice::今天已有主任务在排队或执行中，继续等待，不兜底。"
+              exit 0
+            fi
+            if [ "$ok" -gt 0 ]; then
+              echo "::notice::今天已签到成功，无需兜底。"
+              exit 0
+            fi
+            if [ "$total" -ge "$MAX_ATTEMPTS" ]; then
+              echo "::warning::今天已尝试 $total 次仍未成功，停止兜底以避免刷屏，请检查 GLADOS_COOKIES 是否过期。"
+              exit 0
+            fi
+          fi
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "::warning::[dry_run] 本应触发兜底签到，已被跳过。"
+            exit 0
+          fi
+
+          echo "::notice::今天还没有签到成功的记录，触发兜底签到。"
+          gh workflow run gladosCheck.yml --repo "$REPO" --ref master
+          echo "兜底触发已提交。"
+
+      - name: Cleanup old watchdog runs
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TZ: Asia/Shanghai
+        run: |
+          set -uo pipefail
+          today=$(date +%F)
+          gh run list --repo "$REPO" --workflow watchdog.yml --limit 100 \
+            --json databaseId,createdAt,status > /tmp/wd-runs.json 2>/dev/null || exit 0
+          while read -r id created status; do
+            [ "$status" = "completed" ] || continue
+            d=$(date -d "$created" +%F 2>/dev/null) || continue
+            if [ "$d" != "$today" ]; then
+              echo "清理旧的 watchdog 运行 $id ($created)"
+              gh run delete "$id" --repo "$REPO" >/dev/null 2>&1 || true
+            fi
+          done < <(jq -r '.[] | "\(.databaseId) \(.createdAt) \(.status)"' /tmp/wd-runs.json)
+          echo "清理完成。"
