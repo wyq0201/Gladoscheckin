@@ -3,7 +3,7 @@ name: auto check
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 4,10 * * *'
+    - cron: '40 0 * * *'
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
