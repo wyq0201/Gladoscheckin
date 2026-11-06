@@ -1,0 +1,97 @@
+name: glados checkin
+
+# 本仓库的签到入口（上游自带的 gladosCheck.yml 已在仓库里 disable，避免重复签）
+# 与上游的区别只有三处：
+#   1. 跑 custom_run.py 而不是 checkin.py（定制全在包装层，上游文件保持原样）
+#   2. cron 固定为北京 08:40
+#   3. 失败 / 积分异常时自动触发 upstream 同步
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ master ]
+    paths-ignore:
+      - 'README.md'
+      - 'imgs/**'
+      - '.workbuddy/**'
+  schedule:
+    - cron: '40 8 * * *'
+      timezone: 'Asia/Shanghai'
+
+concurrency:
+  group: glados-checkin
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: glados checkin
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: read
+      actions: write
+
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # continue-on-error：异常也要先把同步和保活跑完，最后再统一标红
+      - name: Running checkin
+        id: checkin
+        continue-on-error: true
+        run: python custom_run.py
+        env:
+          PUSH_PLUS_TOKEN: ${{ secrets.PUSH_PLUS_TOKEN }}
+          PUSHDEER_SENDKEY: ${{ secrets.PUSHDEER_SENDKEY }}
+          SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
+          GLADOS_COOKIES: ${{ secrets.GLADOS_COOKIES }}
+          GLADOS_EXCHANGE_PLAN: ${{ secrets.GLADOS_EXCHANGE_PLAN }}
+          GLADOS_VERBOSE: ${{ secrets.GLADOS_VERBOSE }}
+          # 低于这个分数视为异常（默认 3）。想改就在仓库 Variables 里加同名变量
+          GLADOS_MIN_POINTS: ${{ vars.GLADOS_MIN_POINTS }}
+
+      # 签到失败 / 积分异常 → 试着拉一次上游（上游没更新就空转，等明天）
+      - name: Sync upstream on abnormal result
+        if: steps.checkin.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "本次判定为异常，触发上游同步"
+          gh workflow run sync-upstream.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref master \
+            -f reason=checkin-abnormal || true
+
+      - name: Keep alive
+        if: ${{ !cancelled() }}
+        uses: liskin/gh-workflow-keepalive@v1
+
+      - name: Delete workflow runs
+        if: ${{ !cancelled() }}
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          retain_days: 7
+          keep_minimum_runs: 7
+          delete_run_by_conclusion_pattern: success
+
+      - name: Fail if abnormal
+        if: steps.checkin.outcome == 'failure'
+        run: |
+          echo "::error::签到失败或积分异常（详见上方日志与推送），已尝试同步上游"
+          exit 1

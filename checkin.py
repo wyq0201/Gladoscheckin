@@ -984,7 +984,6 @@ class Config:
 
     ENV_PUSH_KEY = "PUSHDEER_SENDKEY"
     ENV_SERVERCHAN_KEY = "SERVERCHAN_SENDKEY"
-    ENV_PUSHPLUS_KEY = "PUSH_PLUS_TOKEN"
     ENV_COOKIES = "GLADOS_COOKIES"
     ENV_EXCHANGE_PLAN = "GLADOS_EXCHANGE_PLAN"
     ENV_VERBOSE = "GLADOS_VERBOSE"
@@ -996,7 +995,6 @@ class Config:
         self.env = env if env is not None else os.environ
         self.push_key = ""
         self.serverchan_key = ""
-        self.pushplus_key = ""
         self.accounts = Accounts()
         self.exchange_plan = self.DEFAULT_EXCHANGE_PLAN
         self.verbose = self.DEFAULT_VERBOSE
@@ -1023,11 +1021,7 @@ class Config:
         logger.info(f"{LogEmoji.INFO} 共加载了 {len(self.accounts)} 个账号用于签到。")
         for account in self.accounts:
             logger.info(f"{LogEmoji.INFO} {LogEmoji.COOKIE}[{account.label}] {LogEmoji.DOMAIN}[{account.origin or '待探测'}] UA={'自定义' if account.user_agent else '默认'}")
-        logger.info(
-            f"{LogEmoji.INFO} 当前 {self.ENV_PUSH_KEY} {'已设置' if self.push_key else '未设置'}，"
-            f"{self.ENV_SERVERCHAN_KEY} {'已设置' if self.serverchan_key else '未设置'}，"
-            f"{self.ENV_PUSHPLUS_KEY} {'已设置' if self.pushplus_key else '未设置'}。"
-        )
+        logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_PUSH_KEY} {'已设置' if self.push_key else '未设置'}，" f"{self.ENV_SERVERCHAN_KEY} {'已设置' if self.serverchan_key else '未设置'}。")
         logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_EXCHANGE_PLAN}: {self.exchange_plan}。")
         logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_VERBOSE}: {self.verbose}。")
 
@@ -1035,11 +1029,7 @@ class Config:
         return (self.env.get(key) or "").strip()
 
     def _load_push_keys(self) -> None:
-        for key, env_name in (
-            ("push_key", self.ENV_PUSH_KEY),
-            ("serverchan_key", self.ENV_SERVERCHAN_KEY),
-            ("pushplus_key", self.ENV_PUSHPLUS_KEY),
-        ):
+        for key, env_name in (("push_key", self.ENV_PUSH_KEY), ("serverchan_key", self.ENV_SERVERCHAN_KEY)):
             value = self._get(env_name)
             setattr(self, key, value)
             if not value:
@@ -1202,44 +1192,6 @@ class ServerChanBackend(PushBackend):
             return False
 
 
-class PushPlusBackend(PushBackend):
-    """PushPlus（pushplus.plus）后端 —— 微信推送，纯 HTTP，无需额外依赖"""
-
-    name = "PushPlus"
-    URL = "https://www.pushplus.plus/send"
-
-    def __init__(self, token: str):
-        self.token = token
-
-    def send(self, report: Report) -> bool:
-        # PushPlus 的 title 不允许换行，否则接口拒收
-        title = " ".join(str(report.title).split()) or "GLaDOS 签到通知"
-        payload = {
-            "token": self.token,
-            "title": title,
-            "content": self._render(report),
-            "template": "txt",
-        }
-        try:
-            resp = requests.post(self.URL, json=payload, timeout=15)
-            if resp.status_code != 200:
-                logger.error(f"{LogEmoji.ERROR} [{self.name}] 推送失败: HTTP {resp.status_code} {resp.text[:200]}")
-                return False
-            try:
-                data = resp.json()
-            except ValueError:
-                logger.error(f"{LogEmoji.ERROR} [{self.name}] 推送失败: 响应非 JSON {resp.text[:200]}")
-                return False
-            if data.get("code") == 200:
-                logger.info(f"{LogEmoji.SUCCESS} [{self.name}] 推送成功")
-                return True
-            logger.error(f"{LogEmoji.ERROR} [{self.name}] 推送失败: {data}")
-            return False
-        except Exception as e:  # noqa: BLE001 - 推送失败不应影响主流程
-            logger.error(f"{LogEmoji.ERROR} [{self.name}] 推送失败: {e}")
-            return False
-
-
 class PushService:
     """聚合多个推送后端，向全部已配置的后端发送（都发）"""
 
@@ -1251,8 +1203,6 @@ class PushService:
             self.backends.append(PushDeerBackend(config.push_key))
         if config.serverchan_key:
             self.backends.append(ServerChanBackend(config.serverchan_key))
-        if config.pushplus_key:
-            self.backends.append(PushPlusBackend(config.pushplus_key))
 
     def send(self, report: Report) -> bool:
         """向所有已配置后端发送，任一成功即视为成功"""
@@ -1328,16 +1278,6 @@ def main() -> None:
         else:
             logger.info(f"{LogEmoji.START} 步骤 2: 执行签到")
             report = CheckinRunner(config).run()
-
-            # 签到失败要让工作流变红：否则 GitHub 永远显示绿色，
-            # 用户只能靠"今天没收到推送"才发现问题（本仓库踩过这个坑）。
-            failed = [e for e in config.accounts if e.result.code is CheckinStatus.FAILURE]
-            if failed:
-                logger.error(
-                    f"{LogEmoji.ERROR} {len(failed)}/{len(config.accounts)} 个账号签到失败，"
-                    f"本次退出码置 1 以便 GitHub 标红并发送失败邮件。"
-                )
-                exit_code = 1
 
             logger.info(f"{LogEmoji.START} 步骤 3: 生成报告")
             logger.info(f"\n{LogEmoji.END} ========== 签到总结 ==========\n{report.title}\n{report.render()}")

@@ -1,0 +1,141 @@
+name: sync upstream
+
+# 把上游 Devilstore/Glados-Railgun-checkin 的更新合进来。
+#
+# 触发方式：
+#   1. 每天北京 08:10 自动检查一次（签到 08:40 之前，先看上游有没有更新）
+#   2. custom-checkin 判定签到失败 / 积分异常时自动触发（reason=checkin-abnormal）
+#   3. 手动 Run workflow
+#
+# 行为：
+#   * 上游有新提交 → merge 后 push（push 会触发 custom-checkin 重跑一次签到）
+#   * 上游没更新   → 什么都不做，等明天
+#   * 合并冲突     → 中止并推送告警，等你人工处理（不会留半成品）
+#
+# 为什么不会天天冲突：所有定制都在 custom_run.py / custom-checkin.yml / 本文件里，
+# checkin.py 等上游文件保持原样。
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: '触发原因（只写日志）'
+        required: false
+        default: 'manual'
+      force:
+        description: '忽略「今天已同步过」的守卫，强制再检查一次'
+        type: boolean
+        default: false
+  schedule:
+    - cron: '10 8 * * *'
+      timezone: 'Asia/Shanghai'
+
+concurrency:
+  group: glados-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: sync upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: write
+      actions: write
+
+    env:
+      UPSTREAM_REPO: Devilstore/Glados-Railgun-checkin
+      TZ: Asia/Shanghai
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      # 同一天只同步一次：避免「异常 → 同步 → 又异常 → 再同步」反复空转
+      - name: Guard
+        id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ github.event.inputs.force || 'false' }}
+          REASON: ${{ github.event.inputs.reason || 'schedule' }}
+        run: |
+          set -uo pipefail
+          today=$(date +%F)
+          already=false
+          while read -r ts status; do
+            [ "$status" = "completed" ] || continue
+            d=$(date -d "$ts" +%F 2>/dev/null) || continue
+            if [ "$d" = "$today" ]; then already=true; break; fi
+          done < <(gh run list --repo "$GITHUB_REPOSITORY" --workflow sync-upstream.yml \
+                     --limit 40 --json createdAt,status \
+                     -q '.[] | "\(.createdAt) \(.status)"')
+
+          echo "今天 $today 已同步过：$already（本次触发原因：$REASON）"
+          if [ "$already" = "true" ] && [ "$FORCE" != "true" ]; then
+            echo "::notice::今天已经同步过一次，跳过（等明天，或手动勾 force 强制）"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        if: steps.guard.outputs.run == 'true'
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Fetch upstream and compare
+        id: check
+        if: steps.guard.outputs.run == 'true'
+        run: |
+          set -uo pipefail
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null || true
+          git fetch upstream --prune --tags
+
+          behind=$(git rev-list --count HEAD..upstream/master)
+          echo "上游领先本仓库 $behind 个提交"
+          if [ "$behind" != "0" ]; then
+            echo "--- 待合并的提交 ---"
+            git log --oneline HEAD..upstream/master | head -20
+          fi
+          echo "behind=$behind" >> "$GITHUB_OUTPUT"
+
+      - name: Merge upstream
+        id: merge
+        if: steps.guard.outputs.run == 'true' && steps.check.outputs.behind != '0'
+        run: |
+          set -uo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git merge --no-edit upstream/master; then
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::已合并上游最新代码"
+          else
+            git merge --abort || true
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+            echo "::error::合并上游时冲突，已中止（工作区未改动），需要人工处理"
+            exit 1
+          fi
+
+      - name: Push merged code
+        if: steps.merge.outputs.merged == 'true'
+        run: |
+          git push origin HEAD:master
+          echo "::notice::已推送，push 会触发 custom-checkin 重跑一次签到"
+
+      - name: Report no-op
+        if: steps.check.outputs.behind == '0'
+        run: echo "::notice::上游没有新提交，本次不做任何改动，等明天再检查"
+
+      # 冲突时推送告警，别让你以为一切正常
+      - name: Notify on failure
+        if: failure()
+        env:
+          PUSH_PLUS_TOKEN: ${{ secrets.PUSH_PLUS_TOKEN }}
+        run: |
+          set -uo pipefail
+          [ -n "${PUSH_PLUS_TOKEN:-}" ] || { echo "未配置 PUSH_PLUS_TOKEN，跳过告警"; exit 0; }
+          curl -sS -X POST "https://www.pushplus.plus/send" \
+            -H "Content-Type: application/json" \
+            -d "{\"token\":\"${PUSH_PLUS_TOKEN}\",\"title\":\"GLaDOS 同步上游失败\",\"content\":\"合并上游代码时出错（多为冲突），需要人工处理：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",\"template\":\"txt\"}" \
+            > /dev/null && echo "告警已发送" || echo "告警发送失败"

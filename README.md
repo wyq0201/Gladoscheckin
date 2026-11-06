@@ -28,12 +28,11 @@
 1. Fork 本仓库。
 2. 在自己的仓库进入 `Settings` → `Secrets and variables` → `Actions` → `New repository secret`，至少添加 `GLADOS_COOKIES`。
 3. 打开 `Actions` → `auto check` → `Run workflow` 手动跑一次，看到「签到成功」或「重复签到」即完成。
-4. 之后每天 **08:40**（北京时间）自动运行；漏跑由 `glados watchdog` 兜底（北京 11:00–22:00 每小时检查一次）。
+4. 之后每天 **09:18 / 12:18**（北京时间）自动运行。
 
 | Secret | 必填 | 说明 |
 | --- | :---: | --- |
 | `GLADOS_COOKIES` | **是** | 账号列表，固定 JSON 数组，见[账号配置](#配置-glados_cookies) |
-| `PUSH_PLUS_TOKEN` | 否 | **PushPlus（本仓库首选）**，微信推送，见[消息推送](#消息推送) |
 | `PUSHDEER_SENDKEY` | 否 | PushDeer 推送，见[消息推送](#消息推送) |
 | `SERVERCHAN_SENDKEY` | 否 | Server酱 推送，见[消息推送](#消息推送) |
 | `GLADOS_EXCHANGE_PLAN` | 否 | `plan100` / `plan200` / `plan500`，见[积分兑换](#积分兑换) |
@@ -102,11 +101,10 @@
 
 | 后端 | Secret | 获取密钥 |
 | --- | --- | --- |
-| **PushPlus** | `PUSH_PLUS_TOKEN` | [pushplus.plus](https://www.pushplus.plus/) 微信扫码登录，复制页面上的 token（本仓库实际使用） |
 | PushDeer | `PUSHDEER_SENDKEY` | [pushdeer.com](https://www.pushdeer.com/product.html) 下载 App，在 App 内获取 pushkey |
 | Server酱 | `SERVERCHAN_SENDKEY` | [sct.ftqq.com](https://sct.ftqq.com/) 微信扫码登录，在页面获取 SendKey |
 
-三个可单独或同时配置（都发，任一成功即视为成功）；都不配则跳过推送，不影响签到。
+两个可单独或同时配置（都发，任一成功即视为成功）；都不配则跳过推送，不影响签到。
 
 ### 推送效果
 
