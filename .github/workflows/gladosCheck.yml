@@ -8,9 +8,7 @@ on:
       - 'README.md'
       - 'imgs/**'
   schedule:
-    # 北京时间 08:40（timezone 已声明，cron 直接按北京时间解释）
-    # 漏跑由 glados watchdog 兜底，见 watchdog.yml
-    - cron: '40 8 * * *'
+    - cron: '18 9,12 * * *'
       timezone: 'Asia/Shanghai'
 
 # 定时与手动触发可能重叠：同一时间只保留一个运行，避免重复签到与重复推送
@@ -58,7 +56,6 @@ jobs:
       run: |
         python checkin.py
       env:
-        PUSH_PLUS_TOKEN: ${{ secrets.PUSH_PLUS_TOKEN }}
         PUSHDEER_SENDKEY: ${{ secrets.PUSHDEER_SENDKEY }}
         SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
         GLADOS_COOKIES: ${{ secrets.GLADOS_COOKIES }}
