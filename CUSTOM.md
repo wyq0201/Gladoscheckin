@@ -43,6 +43,29 @@ workflow 里跑 `python custom_run.py`，不直接跑 `checkin.py`。
          └─ 异常 → 退出码 1（job 变红）+ 告警推送 + 自动触发 sync upstream
 ```
 
+### ⚠️ 为什么同步要用 SYNC_TOKEN 而不是 GITHUB_TOKEN
+
+2026-11-07/08 连续两天同步失败，报错：
+
+```
+! [remote rejected] HEAD -> master
+(refusing to allow a GitHub App to create or update workflow
+ `.github/workflows/gladosCheck.yml` without `workflows` permission)
+```
+
+**不是冲突，是 push 被拒**。原因：上游提交 `bbc0765` 把 `gladosCheck.yml` 的
+`name` 从 `auto check` 改成 `GLaDOS Check-in`，而 `GITHUB_TOKEN` 属于 GitHub App，
+**没有 `workflows` 权限就不能推送任何 `.github/workflows/**` 的改动**——
+这个权限在 `permissions:` 块里也声明不出来，只有 PAT 的 `workflow` scope 可以。
+
+所以 `sync-upstream.yml` 的 checkout 用的是 `secrets.SYNC_TOKEN`
+（classic PAT，scope = `repo` + `workflow`），`persist-credentials` 让后续
+`git push` 复用它。
+
+**PAT 过期/被吊销时**：同步会失败并推送「GLaDOS 同步上游失败」告警，
+届时重新生成一个带 `repo` + `workflow` scope 的 classic PAT，
+更新 `SYNC_TOKEN` secret 即可，不用改代码。
+
 ## 什么算「异常」
 
 `custom_run.py` 里判定，任一命中即异常：
@@ -78,6 +101,7 @@ workflow 里跑 `python custom_run.py`，不直接跑 `checkin.py`。
 | 推送说「积分异常」 | 上游可能又加了新校验 → 看 `sync upstream` 是否拉到新代码 |
 | job 变红 | 点进去看 `Running checkin` 步骤的日志，异常项会打在最下面 |
 | 同步冲突 | 说明上游改了我们也改过的文件（理论上不会发生），需要人工 merge |
+| 同步报 `refusing to allow ... without workflows permission` | `SYNC_TOKEN` 失效或没配，重新生成带 `repo`+`workflow` scope 的 PAT 并更新 secret |
 
 **Cookie 失效的标准做法**：浏览器登录 glados.cloud → F12 → Network → 刷新 →
 任一请求 → Request Headers → 复制 `Cookie` 和 `User-Agent` → 拼成 JSON 数组塞进
