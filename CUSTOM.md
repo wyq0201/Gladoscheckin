@@ -23,10 +23,34 @@ workflow 里跑 `python custom_run.py`，不直接跑 `checkin.py`。
 
 | workflow | 文件 | 触发 | 干什么 |
 |---|---|---|---|
-| **glados checkin** | `custom-checkin.yml` | 每天北京 **08:40**、push、手动 | 跑 `custom_run.py` 签到 + PushPlus 推送 |
-| **sync upstream** | `sync-upstream.yml` | 每天北京 **08:10**、手动、被上一条调用 | 拉上游；有更新就 merge+push，没更新就空转等明天 |
+| **glados checkin** | `custom-checkin.yml` | 每天北京 **08:40**、手动 | 跑 `custom_run.py` 签到 + PushPlus 推送 |
+| **sync upstream** | `sync-upstream.yml` | 每天北京 **08:10**、手动、被上一条调用 | 拉上游；有更新就 merge+push 并触发一次签到，没更新就空转等明天 |
 | **glados watchdog** | `watchdog.yml` | 北京 11:00–22:00 每小时 | 只在「今天压根没跑」时兜底触发签到 |
-| ~~auto check~~ | `gladosCheck.yml` | — | 上游自带，**已手动 disable**，避免重复签到 |
+| ~~GLaDOS Check-in~~ | `gladosCheck.yml` | — | 上游自带，**已手动 disable**，避免重复签到 |
+
+> ⚠️ `custom-checkin.yml` **刻意不挂 `on: push`**。
+> 否则每次改代码都会签一次，白白产生一堆「重复签到」的空跑。
+> 需要验证新代码时：sync 合并后会自己 dispatch，或者手动 Run workflow。
+
+## 一天到底签几次、推几条
+
+**正常情况：签 1 次、推 1 条**（08:40 那次）。
+
+| 场景 | 签到次数 | 推送条数 |
+|---|---|---|
+| 一切正常 | 1（08:40） | 1（签到成功） |
+| 08:40 的定时被 GitHub 丢了 | 1（11:00 起 watchdog 补） | 1 |
+| 上游有更新 | 1–2（08:10 sync 合并后签一次；08:40 若再跑就是重复签到） | 1（重复那次静默） |
+| 签到失败 / 积分异常 | 1–3（异常会再拉上游重试一次） | 1 + 1 条异常告警 |
+| 手动点 Run workflow（当天已签） | 多一次空跑 | **0**（重复签到不推） |
+
+**三条去噪规则**：
+
+1. **全部「重复签到」不推送** —— 今天早签过了，再推没有新信息
+2. **watchdog 只在 11:00–22:00 兜底** —— GitHub 的定时会延迟几小时甚至跨天，
+   曾出现前晚 22:00 的档延迟到次日 00:33 执行，那次兜底等于"半夜签明天的"，
+   结果 08:40 正常签到时全变重复
+3. **push 不触发签到** —— 见上方说明
 
 ## 自动拉上游的逻辑
 
