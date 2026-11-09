@@ -53,6 +53,15 @@ jobs:
           echo "北京时间今天: $today"
           echo "force_check=$FORCE_CHECK dry_run=$DRY_RUN"
 
+          # 时间窗口守卫：GitHub 的 schedule 会延迟几小时甚至跨天，
+          # 昨晚 22:00 那档曾延迟到次日 00:33 才执行 —— 那时兜底等于"半夜签明天的"，
+          # 结果 08:40 正常定时再跑就变成重复签到。所以只在 11:00-22:00 之间兜底。
+          hour=$(date +%H); hour=$((10#$hour))
+          if [ "$FORCE_CHECK" != "true" ] && { [ "$hour" -lt 11 ] || [ "$hour" -gt 22 ]; }; then
+            echo "::notice::当前北京时间 ${hour} 点，不在兜底窗口（11:00-22:00），跳过。多半是定时延迟到凌晨了。"
+            exit 0
+          fi
+
           gh workflow enable custom-checkin.yml --repo "$REPO" >/dev/null 2>&1 \
             && echo "已确认 custom-checkin.yml 处于启用状态" \
             || echo "::warning::启用 custom-checkin.yml 失败，请检查权限"

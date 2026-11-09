@@ -99,6 +99,19 @@ class CustomPushService(checkin.PushService):
         if token:
             self.backends.append(PushPlusBackend(token))
 
+    def send(self, report) -> bool:
+        """全部「重复签到」时不推送 —— 今天早就签过了，再推一条纯属噪音。
+
+        典型场景：08:40 的定时被 GitHub 延迟到下午才落地，甚至隔天凌晨才落地，
+        这时 GLaDOS 返回 code=1（重复签到），推送没有任何新信息。
+        只要有账号是真签到成功、或者有失败，就正常推。
+        """
+        entries = list(getattr(report, "entries", []) or [])
+        if entries and all(e.result.code is checkin.CheckinStatus.REPEAT for e in entries):
+            logger.info(f"{LogEmoji.INFO} 本次全部为重复签到（今天已签过），跳过推送")
+            return False
+        return super().send(report)
+
 
 class _Alert:
     """给 PushPlusBackend 用的最小报告对象（只发简短告警，不重发整份报告）"""

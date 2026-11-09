@@ -5,15 +5,12 @@ name: glados checkin
 #   1. 跑 custom_run.py 而不是 checkin.py（定制全在包装层，上游文件保持原样）
 #   2. cron 固定为北京 08:40
 #   3. 失败 / 积分异常时自动触发 upstream 同步
+#
+# 刻意不挂 on: push —— 每次改代码都触发签到会产生大量「重复签到」的空跑。
+# 需要同步新代码后立刻验证时，由 sync-upstream.yml 显式 dispatch，或手动 Run workflow。
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ master ]
-    paths-ignore:
-      - '**.md'
-      - 'imgs/**'
-      - '.workbuddy/**'
   schedule:
     - cron: '40 8 * * *'
       timezone: 'Asia/Shanghai'

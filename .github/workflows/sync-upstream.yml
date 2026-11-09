@@ -127,7 +127,16 @@ jobs:
         if: steps.merge.outputs.merged == 'true'
         run: |
           git push origin HEAD:master
-          echo "::notice::已推送，push 会触发 custom-checkin 重跑一次签到"
+          echo "::notice::已合并并推送上游代码"
+
+      # custom-checkin 不再挂 on: push，所以这里显式触发一次，用新代码签到
+      - name: Trigger checkin with new code
+        if: steps.merge.outputs.merged == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run custom-checkin.yml --repo "$GITHUB_REPOSITORY" --ref master
+          echo "::notice::已触发签到（若今天已签过，脚本会识别为重复签到并且不推送）"
 
       - name: Report no-op
         if: steps.check.outputs.behind == '0'
