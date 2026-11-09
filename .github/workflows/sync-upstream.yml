@@ -77,11 +77,17 @@ jobs:
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # 用 PAT（SYNC_TOKEN）而不是 GITHUB_TOKEN：
+      # 上游一旦改动 .github/workflows/** 下的文件，GITHUB_TOKEN 会因缺少
+      # `workflows` 权限被 GitHub 拒收（refusing to allow a GitHub App to
+      # create or update workflow ... without `workflows` permission）。
+      # PAT 有 repo + workflow scope，能正常推。
       - name: Checkout
         if: steps.guard.outputs.run == 'true'
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN }}
           persist-credentials: true
 
       - name: Fetch upstream and compare
