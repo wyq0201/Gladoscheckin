@@ -3,17 +3,31 @@ name: glados checkin
 # 本仓库的签到入口（上游自带的 gladosCheck.yml 已在仓库里 disable，避免重复签）
 # 与上游的区别只有三处：
 #   1. 跑 custom_run.py 而不是 checkin.py（定制全在包装层，上游文件保持原样）
-#   2. cron 固定为北京 08:40
+#   2. 由青龙面板精确定时触发（见下方「触发方式」）
 #   3. 失败 / 积分异常时自动触发 upstream 同步
 #
 # 刻意不挂 on: push —— 每次改代码都触发签到会产生大量「重复签到」的空跑。
 # 需要同步新代码后立刻验证时，由 sync-upstream.yml 显式 dispatch，或手动 Run workflow。
-
+#
+# ── 触发方式（2026-11-11 改）────────────────────────────────────────────
+# 原先挂的是 `cron: '40 8'` + `timezone: Asia/Shanghai`，结果 GitHub 对这个仓库的
+# schedule 严重降级，实测（北京时间）：
+#
+#     应 08:40 → 11-07 14:35 · 11-08 14:41 · 11-09 15:10 · 11-10 15:43
+#
+# 起步就迟 5h55m，而且每天再往后漂半小时。同仓库 watchdog（12 次/天）11-10 只
+# 跑了 1 次，落地 18:29 UTC —— 超出 cron 区间 4.5 小时。
+# 而 workflow_dispatch 是零延迟的（实测提交 10:24:35，run 的 created_at 也是
+# 10:24:35，45 秒完成）。所以：
+#
+#   · 触发权交给青龙面板 08:40 跑 `gh_dispatch.py`（.py 不受 RandomDelay 影响）
+#   · 本文件只保留 workflow_dispatch，不再挂 schedule（挂着重跑纯浪费且时间不可控）
+#   · watchdog 缩到 16:00 / 19:00 两次，只做「青龙挂了」的最后兜底
+#
+# ⚠️ 青龙上的任务被删 / 容器重建后，必须恢复 id=227 的 `task gh_dispatch.py`，
+#    否则签到会退化成只剩 watchdog 两次兜底。
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '40 8 * * *'
-      timezone: 'Asia/Shanghai'
 
 concurrency:
   group: glados-checkin

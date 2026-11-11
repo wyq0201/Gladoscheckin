@@ -23,23 +23,54 @@ workflow 里跑 `python custom_run.py`，不直接跑 `checkin.py`。
 
 | workflow | 文件 | 触发 | 干什么 |
 |---|---|---|---|
-| **glados checkin** | `custom-checkin.yml` | 每天北京 **08:40**、手动 | 跑 `custom_run.py` 签到 + PushPlus 推送 |
+| **glados checkin** | `custom-checkin.yml` | **青龙面板 08:40** dispatch、手动 | 跑 `custom_run.py` 签到 + PushPlus 推送 |
 | **sync upstream** | `sync-upstream.yml` | 每天北京 **08:10**、手动、被上一条调用 | 拉上游；有更新就 merge+push 并触发一次签到，没更新就空转等明天 |
-| **glados watchdog** | `watchdog.yml` | 北京 11:00–22:00 每小时 | 只在「今天压根没跑」时兜底触发签到 |
+| **glados watchdog** | `watchdog.yml` | 北京 **16:00 / 19:00** | 只在「今天压根没跑」时兜底触发签到 |
 | ~~GLaDOS Check-in~~ | `gladosCheck.yml` | — | 上游自带，**已手动 disable**，避免重复签到 |
 
 > ⚠️ `custom-checkin.yml` **刻意不挂 `on: push`**。
 > 否则每次改代码都会签一次，白白产生一堆「重复签到」的空跑。
 > 需要验证新代码时：sync 合并后会自己 dispatch，或者手动 Run workflow。
 
+### 为什么不用 GitHub 自带的 schedule（2026-11-11）
+
+原先是 `cron: '40 8'` + `timezone: Asia/Shanghai`，实测这个仓库的 schedule 被降级了：
+
+| 应触发（北京 08:40） | 实际落地 | 迟到 |
+|---|---|---|
+| 11-07 | 14:35 | 5h55m |
+| 11-08 | 14:41 | 6h01m |
+| 11-09 | 15:10 | 6h30m |
+| 11-10 | 15:43 | 7h03m |
+
+**每天再往后漂半小时**，说明是持续欠账不是偶发抖动。同一时期 watchdog
+（`0 3-14`，本该 12 次/天）11-10 只落了 1 次，时间 18:29 UTC，超出 cron 区间 4.5 小时。
+
+而 `workflow_dispatch` 是零延迟的：实测提交 `10:24:35`，run 的 `created_at` 也是
+`10:24:35`，45 秒跑完。所以把触发权收回青龙：
+
+| 项 | 值 |
+|---|---|
+| 青龙任务 | id=**227**，`task gh_dispatch.py` |
+| cron | `0 40 8 * * *`（6 段式，精确到秒） |
+| 脚本 | `/ql/scripts/gh_dispatch.py`（本地留档 `deploy/gh_dispatch.py`） |
+| 环境变量 | `GH_DISPATCH_TOKEN`（GitHub token，需 `repo` / fine-grained 的 `Actions: write`） |
+| 幂等 | 先查当天是否已有运行，有就跳过，不会重复签 |
+| 告警 | dispatch 失败 / 运行结论非 success / 4 分钟未完成 → PushPlus |
+
+青龙的 `RandomDelay="300"` **只作用于 .js 任务**，`.py` 准点执行，不受影响。
+
+> ⚠️ 青龙容器重建后必须恢复：`gh_dispatch.py` 回到 `/ql/scripts/`、
+> id=227 任务还在、`GH_DISPATCH_TOKEN` 还在。否则签到退化成只剩 watchdog 两次兜底。
+
 ## 一天到底签几次、推几条
 
-**正常情况：签 1 次、推 1 条**（08:40 那次）。
+**正常情况：签 1 次、推 1 条**（青龙 08:40 dispatch 那次）。
 
 | 场景 | 签到次数 | 推送条数 |
 |---|---|---|
-| 一切正常 | 1（08:40） | 1（签到成功） |
-| 08:40 的定时被 GitHub 丢了 | 1（11:00 起 watchdog 补） | 1 |
+| 一切正常 | 1（青龙 08:40 dispatch） | 1（签到成功） |
+| 青龙没触发（容器挂了/任务被删） | 1（16:00 或 19:00 watchdog 补） | 1 + 青龙侧告警 |
 | 上游有更新 | 1–2（08:10 sync 合并后签一次；08:40 若再跑就是重复签到） | 1（重复那次静默） |
 | 签到失败 / 积分异常 | 1–3（异常会再拉上游重试一次） | 1 + 1 条异常告警 |
 | 手动点 Run workflow（当天已签） | 多一次空跑 | **0**（重复签到不推） |
@@ -47,9 +78,9 @@ workflow 里跑 `python custom_run.py`，不直接跑 `checkin.py`。
 **三条去噪规则**：
 
 1. **全部「重复签到」不推送** —— 今天早签过了，再推没有新信息
-2. **watchdog 只在 11:00–22:00 兜底** —— GitHub 的定时会延迟几小时甚至跨天，
-   曾出现前晚 22:00 的档延迟到次日 00:33 执行，那次兜底等于"半夜签明天的"，
-   结果 08:40 正常签到时全变重复
+2. **watchdog 只在 16:00–23:00 兜底，一天两次** —— 早先铺了 11:00–22:00 每小时（12 次），
+   但 GitHub 对这些高频档丢得厉害（11-10 只落 1 次，还落在 18:29 UTC），
+   铺宽没换来命中率，只把可能重复签到的时间段拉长了
 3. **push 不触发签到** —— 见上方说明
 
 ## 自动拉上游的逻辑
@@ -62,7 +93,8 @@ workflow 里跑 `python custom_run.py`，不直接跑 `checkin.py`。
          │                   └─ push 触发 glados checkin 立刻签到一次
          └─ 合并冲突 → git merge --abort，推送告警，等你人工处理
 
-08:40  glados checkin
+08:40  青龙 gh_dispatch.py → dispatch glados checkin
+         ├─ 今天已跑过 → 直接跳过（幂等）
          ├─ 正常 → 退出码 0，推送报告
          └─ 异常 → 退出码 1（job 变红）+ 告警推送 + 自动触发 sync upstream
 ```
@@ -120,7 +152,7 @@ workflow 里跑 `python custom_run.py`，不直接跑 `checkin.py`。
 
 | 现象 | 先看哪里 |
 |---|---|
-| 今天没收到推送 | Actions → `glados checkin` 有没有跑；没跑就等 watchdog 11:00 起兜底 |
+| 今天没收到推送 | 青龙 id=227 的日志（有没有 dispatch 成功）；再查 Actions → `glados checkin`；最后看 watchdog 16:00/19:00 |
 | 推送说「签到失败」 | 日志里 8 个域名是否全 `code=-2` → Cookie 失效，重新登录取新 Cookie |
 | 推送说「积分异常」 | 上游可能又加了新校验 → 看 `sync upstream` 是否拉到新代码 |
 | job 变红 | 点进去看 `Running checkin` 步骤的日志，异常项会打在最下面 |
