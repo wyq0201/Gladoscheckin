@@ -60,8 +60,32 @@ workflow 里跑 `python custom_run.py`，不直接跑 `checkin.py`。
 
 青龙的 `RandomDelay="300"` **只作用于 .js 任务**，`.py` 准点执行，不受影响。
 
-> ⚠️ 青龙容器重建后必须恢复：`gh_dispatch.py` 回到 `/ql/scripts/`、
-> id=227 任务还在、`GH_DISPATCH_TOKEN` 还在。否则签到退化成只剩 watchdog 两次兜底。
+### 同一套脚本也接了 52pojie（id=228）
+
+`wyq0201/52pojie_checkIn` 也被同样的方式拖过：cron 是 23:10 UTC（= 北京 07:10），
+实测落地 10:23~12:36，等于整个上午都不可控。所以复用同一份逻辑：
+
+| 项 | 值 |
+|---|---|
+| 青龙任务 | id=**228**，`task gh_dispatch_pojie52.py` |
+| cron | `0 10 7 * * *`（北京 07:10） |
+| 脚本 | `/ql/scripts/gh_dispatch_pojie52.py`（无参 wrapper，配置写死在文件里） |
+| GitHub 侧 | `checkin.yml` 的 schedule 改成 `0 4 * * *`（北京 12:00，兜底） |
+
+**为什么是「无参 wrapper」而不是 `task gh_dispatch.py --repo ...`** ——
+青龙的 `task` 会把参数直接喂给内部 `grep`，`--repo` 会得到：
+
+```
+grep: unrecognized option: repo
+Unrecognized switch: --repo  (-h will show valid options)
+```
+
+所以青龙上不能带命令行参数。wrapper 把配置塞进环境变量（`DISPATCH_REPO` 等）
+再调 `gh_dispatch.main()`；`gh_dispatch.py` 的 argparse 默认值都从这些环境变量读。
+
+> ⚠️ 青龙容器重建后必须恢复：`gh_dispatch.py` 和 `gh_dispatch_pojie52.py` 回到
+> `/ql/scripts/`、id=227/228 任务还在、`GH_DISPATCH_TOKEN` 还在。
+> 否则签到退化成只剩 GitHub 侧那两次兜底。
 
 ## 一天到底签几次、推几条
 

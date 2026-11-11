@@ -136,12 +136,16 @@ def describe(run: dict) -> str:
 
 
 def main() -> int:
+    # 默认值可从环境变量取 —— 青龙的 `task` 会把 `--xxx` 形式的参数喂给内部 grep
+    # （报 `grep: unrecognized option`），所以青龙上不用命令行参数，
+    # 改为一个无参 wrapper 脚本设置环境变量再调 main（见 gh_dispatch_pojie52.py）。
+    env = os.environ.get
     ap = argparse.ArgumentParser()
-    ap.add_argument("--repo", default="wyq0201/Gladoscheckin")
-    ap.add_argument("--wf", type=int, default=409103405)
-    ap.add_argument("--branch", default="master")
-    ap.add_argument("--name", default="GLaDOS")
-    ap.add_argument("--wait", type=int, default=240)
+    ap.add_argument("--repo", default=env("DISPATCH_REPO") or "wyq0201/Gladoscheckin")
+    ap.add_argument("--wf", type=int, default=int(env("DISPATCH_WF") or 409103405))
+    ap.add_argument("--branch", default=env("DISPATCH_BRANCH") or "master")
+    ap.add_argument("--name", default=env("DISPATCH_NAME") or "GLaDOS")
+    ap.add_argument("--wait", type=int, default=int(env("DISPATCH_WAIT") or 240))
     args = ap.parse_args()
 
     name, repo, wf = args.name, args.repo, args.wf
