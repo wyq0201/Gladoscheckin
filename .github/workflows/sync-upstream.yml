@@ -9,8 +9,18 @@ name: sync upstream
 #
 # 行为：
 #   * 上游有新提交 → merge 后 push（push 会触发 custom-checkin 重跑一次签到）
-#   * 上游没更新   → 什么都不做，等明天
+#   * 上游没更新   → 什么都不做，等明天（日志里的「上游领先 0 个提交」就是这条，
+#                    不代表失败 —— 说明之前已经合过了）
 #   * 合并冲突     → 中止并推送告警，等你人工处理（不会留半成品）
+#   * 推送被拒     → 也推送告警，并在 job summary 里写明是权限还是认证问题
+#
+# 历史坑（2026-11-07/08 连续失败两次）：
+#   当时用的是 GITHUB_TOKEN，它作为 GitHub App 身份**没有 `workflow` scope**，
+#   上游一改 `.github/workflows/**` 就被平台硬拒：
+#       refusing to allow a GitHub App to create or update workflow
+#       `.github/workflows/gladosCheck.yml` without `workflows` permission
+#   11-09 换成 classic PAT（`SYNC_TOKEN`，repo + workflow）后彻底解决，
+#   当天 `39468d9` 就成功推了一次带 gladosCheck.yml 改动的 merge —— 权限已验证。
 #
 # 为什么不会天天冲突：所有定制都在 custom_run.py / custom-checkin.yml / 本文件里，
 # checkin.py 等上游文件保持原样。
@@ -123,11 +133,40 @@ jobs:
             exit 1
           fi
 
+      # 推送失败有两大类，报错信息完全不同，别混在一起说成"冲突"：
+      #   a) SYNC_TOKEN 缺 `workflow` scope → 上游动了 .github/workflows/** 就会被拒
+      #      （11-07 / 11-08 那两次就是这个，当时还在用 GITHUB_TOKEN）
+      #   b) 别的原因（网络、分支保护、token 过期/吊销）
       - name: Push merged code
         if: steps.merge.outputs.merged == 'true'
         run: |
-          git push origin HEAD:master
-          echo "::notice::已合并并推送上游代码"
+          set -uo pipefail
+          if out=$(git push origin HEAD:master 2>&1); then
+            echo "$out"
+            echo "::notice::已合并并推送上游代码"
+            exit 0
+          fi
+
+          echo "$out"
+          if printf '%s' "$out" | grep -q "without .workflows. permission"; then
+            {
+              echo "## 推送被拒：SYNC_TOKEN 缺 workflow 权限"
+              echo ""
+              echo "上游改动了 \`.github/workflows/\` 下的文件，而当前 token 没有 \`workflow\` scope，"
+              echo "GitHub 拒绝任何对该目录的写入（这是平台硬限制，不是代码问题）。"
+              echo ""
+              echo "**修法**：Settings → Developer settings → Personal access tokens (classic)"
+              echo "→ 新建/编辑，勾上 \`repo\` + \`workflow\` → 更新仓库 secret \`SYNC_TOKEN\`。"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::推送被拒：SYNC_TOKEN 缺少 workflow scope，推不了 .github/workflows/ 下的文件"
+            echo "::error::处理：重新生成 classic PAT（勾 repo + workflow），更新 secret SYNC_TOKEN"
+          elif printf '%s' "$out" | grep -qiE "bad credentials|authentication failed|403"; then
+            echo "::error::推送被拒：SYNC_TOKEN 可能已过期或被吊销（认证失败）"
+            echo "::error::处理：重新生成 classic PAT（repo + workflow），更新 secret SYNC_TOKEN"
+          else
+            echo "::error::推送失败（非权限问题），详见上方 git 原始输出"
+          fi
+          exit 1
 
       # custom-checkin 不再挂 on: push，所以这里显式触发一次，用新代码签到
       - name: Trigger checkin with new code
@@ -142,7 +181,8 @@ jobs:
         if: steps.check.outputs.behind == '0'
         run: echo "::notice::上游没有新提交，本次不做任何改动，等明天再检查"
 
-      # 冲突时推送告警，别让你以为一切正常
+      # 出错时推送告警。不预设原因（冲突 / 权限 / 网络都可能），
+      # 具体是哪一类已经写进 job summary 和 ::error:: 行里了。
       - name: Notify on failure
         if: failure()
         env:
@@ -152,5 +192,5 @@ jobs:
           [ -n "${PUSH_PLUS_TOKEN:-}" ] || { echo "未配置 PUSH_PLUS_TOKEN，跳过告警"; exit 0; }
           curl -sS -X POST "https://www.pushplus.plus/send" \
             -H "Content-Type: application/json" \
-            -d "{\"token\":\"${PUSH_PLUS_TOKEN}\",\"title\":\"GLaDOS 同步上游失败\",\"content\":\"合并上游代码时出错（多为冲突），需要人工处理：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",\"template\":\"txt\"}" \
+            -d "{\"token\":\"${PUSH_PLUS_TOKEN}\",\"title\":\"GLaDOS 同步上游失败\",\"content\":\"同步上游时出错（冲突 / 权限 / 认证都可能），需人工看一眼：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",\"template\":\"txt\"}" \
             > /dev/null && echo "告警已发送" || echo "告警发送失败"
