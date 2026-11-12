@@ -25,9 +25,10 @@
 异常判定（任一命中即视为异常，退出码 1 + 额外告警推送）
 ------------------------------------------------------
     * 有账号签到失败（CheckinStatus.FAILURE）
-    * 有账号签到成功但本次积分 < GLADOS_MIN_POINTS（默认 3）
-      —— GLaDOS 正常给 5~20 分，只给 1 分通常意味着服务端加了新的校验
-         （例如 2026-11 的 challenge 校验），上游没适配就会一直吃保底分
+    * 有账号签到成功但本次积分 < GLADOS_MIN_POINTS（默认 2，即只有 1 分报警）
+      —— GLaDOS 单日签到是随机分（实测 2 / 8 / 10 都出现过），**只有 1 分**
+         才是"被识别为自动签到"的保底分（上游 README 明确写了）。
+         2026-11-12 那次 2 分属于正常波动，默认阈值曾是 3 造成误报，已下调到 2。
 """
 import os
 import sys
@@ -38,7 +39,7 @@ import requests
 import checkin
 from checkin import LogEmoji, logger
 
-DEFAULT_MIN_POINTS = 3
+DEFAULT_MIN_POINTS = 2
 PUSHPLUS_URL = "https://www.pushplus.plus/send"
 
 
