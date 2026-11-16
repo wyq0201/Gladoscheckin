@@ -24,7 +24,7 @@ workflow 里跑 `python custom_run.py`，不直接跑 `checkin.py`。
 | workflow | 文件 | 触发 | 干什么 |
 |---|---|---|---|
 | **glados checkin** | `custom-checkin.yml` | **青龙面板 08:40** dispatch、手动 | 跑 `custom_run.py` 签到 + PushPlus 推送 |
-| **sync upstream** | `sync-upstream.yml` | 每天北京 **08:10**、手动、被上一条调用 | 拉上游；有更新就 merge+push 并触发一次签到，没更新就空转等明天 |
+| **sync upstream** | `sync-upstream.yml` | **青龙面板 08:10（主）**、GitHub schedule（兜底）、手动、被签到调用 | 拉上游；有更新就 merge+push 并触发一次签到，没更新就空转等明天 |
 | **glados watchdog** | `watchdog.yml` | 北京 **16:00 / 19:00** | 只在「今天压根没跑」时兜底触发签到 |
 | ~~GLaDOS Check-in~~ | `gladosCheck.yml` | — | 上游自带，**已手动 disable**，避免重复签到 |
 
@@ -46,6 +46,21 @@ workflow 里跑 `python custom_run.py`，不直接跑 `checkin.py`。
 **每天再往后漂半小时**，说明是持续欠账不是偶发抖动。同一时期 watchdog
 （`0 3-14`，本该 12 次/天）11-10 只落了 1 次，时间 18:29 UTC，超出 cron 区间 4.5 小时。
 
+2026-11-16 复查，sync upstream 的 `cron: '10 8 * * *'` 症状一样、甚至更糟：
+
+| 应触发（北京 08:10） | 实际落地 | 迟到 |
+|---|---|---|
+| 11-12 | 15:01 | 6h51m |
+| 11-13 | 14:30 | 6h20m |
+| 11-14 | 14:08 | 5h58m |
+| 11-15 | 14:16 | 6h06m |
+| 11-16 | **没跑**（这条 cron 被直接丢弃） | — |
+
+11-16 上游 v1.0.1（扩展版）能被合进来，其实是 08:40 签到失败后自愈 dispatch 的
+（run #17/#18 全是 `workflow_dispatch`），schedule 一次都没贡献。
+所以 sync 也照签到的办法处理：**主触发器换成青龙 id=229，schedule 降级为兜底**
+（留着是因为青龙万一挂了还能兜一下，Guard 会挡掉重复）。
+
 而 `workflow_dispatch` 是零延迟的：实测提交 `10:24:35`，run 的 `created_at` 也是
 `10:24:35`，45 秒跑完。所以把触发权收回青龙：
 
@@ -59,6 +74,21 @@ workflow 里跑 `python custom_run.py`，不直接跑 `checkin.py`。
 | 告警 | dispatch 失败 / 运行结论非 success / 4 分钟未完成 → PushPlus |
 
 青龙的 `RandomDelay="300"` **只作用于 .js 任务**，`.py` 准点执行，不受影响。
+
+### 同一套脚本也接了 sync upstream（id=229，2026-11-16）
+
+就是上面那张表里的 08:10 那一环，改用同一份 `gh_dispatch.py` 逻辑：
+
+| 项 | 值 |
+|---|---|
+| 青龙任务 | id=**229**，`task gh_dispatch_sync.py` |
+| cron | `0 10 8 * * *`（北京 08:10） |
+| 脚本 | `/ql/scripts/gh_dispatch_sync.py`（无参 wrapper，本地留档 `deploy/gh_dispatch_sync.py`） |
+| 目标 | `wyq0201/Gladoscheckin` / workflow **409103406**（sync-upstream.yml）/ `master` |
+| 幂等 | 当天已有 run（不论脚本跑的还是自愈 dispatch 的）就跳过，与 sync 内部 Guard 语义一致 |
+
+时序不变：08:10 同步 → 上游有更新就 merge+push 并立刻 dispatch 一次签到
+（等于改完立即验证）；08:40 青龙照常再 dispatch 一次，若 08:10 已签过会自己 skip。
 
 ### 同一套脚本也接了 52pojie（id=228）
 
@@ -83,9 +113,10 @@ Unrecognized switch: --repo  (-h will show valid options)
 所以青龙上不能带命令行参数。wrapper 把配置塞进环境变量（`DISPATCH_REPO` 等）
 再调 `gh_dispatch.main()`；`gh_dispatch.py` 的 argparse 默认值都从这些环境变量读。
 
-> ⚠️ 青龙容器重建后必须恢复：`gh_dispatch.py` 和 `gh_dispatch_pojie52.py` 回到
-> `/ql/scripts/`、id=227/228 任务还在、`GH_DISPATCH_TOKEN` 还在。
-> 否则签到退化成只剩 GitHub 侧那两次兜底。
+> ⚠️ 青龙容器重建后必须恢复：`gh_dispatch.py`、`gh_dispatch_sync.py`、
+> `gh_dispatch_pojie52.py` 回到 `/ql/scripts/`、id=227/229/228 任务还在、
+> `GH_DISPATCH_TOKEN` 还在。
+> 否则签到退化成只剩 GitHub 侧那两次兜底，同步退化成只剩 schedule（等于随机）。
 
 ## 一天到底签几次、推几条
 
@@ -110,7 +141,7 @@ Unrecognized switch: --repo  (-h will show valid options)
 ## 自动拉上游的逻辑
 
 ```
-08:10  sync upstream
+08:10  青龙 gh_dispatch_sync.py → dispatch sync upstream
          ├─ 今天已同步过？ → 跳过（防"异常→同步→又异常"死循环）
          ├─ 上游领先 0 个提交 → 打印 notice，什么都不做，等明天
          ├─ 上游有新提交 → git merge upstream/master → git push

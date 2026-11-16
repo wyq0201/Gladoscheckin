@@ -3,9 +3,18 @@ name: sync upstream
 # 把上游 Devilstore/Glados-Railgun-checkin 的更新合进来。
 #
 # 触发方式：
-#   1. 每天北京 08:10 自动检查一次（签到 08:40 之前，先看上游有没有更新）
+#   1. 每天北京 08:10 由青龙 id=229 跑 `task gh_dispatch_sync.py` → dispatch 本文件
+#      （**主触发器**，见下方「为什么不靠 GitHub schedule」）
 #   2. custom-checkin 判定签到失败 / 积分异常时自动触发（reason=checkin-abnormal）
 #   3. 手动 Run workflow
+#   4. GitHub 自带 schedule（08:10）保留为兜底 —— 青龙挂了才轮到它
+#
+# 为什么不靠 GitHub schedule（2026-11-16 实测，北京时间取自 API 的 created_at）：
+#   应 08:10 → 11-12 15:01 · 11-13 14:30 · 11-14 14:08 · 11-15 14:16
+#   11-16      → 这条 cron 被直接丢弃，压根没生成 scheduled run
+#   起步迟 6 小时、且不稳定到会丢；同期 watchdog 12 次/天只落 1 次（11-15 23:32）。
+#   而 workflow_dispatch 走 webhook，秒级创建、十几秒跑完（见 custom-checkin.yml 同款处理）。
+#   所以主触发权收到青龙，schedule 只当「青龙死了」的最后兜底 —— Guard 会挡掉重复。
 #
 # 行为：
 #   * 上游有新提交 → merge 后 push（push 会触发 custom-checkin 重跑一次签到）
@@ -36,6 +45,9 @@ on:
         description: '忽略「今天已同步过」的守卫，强制再检查一次'
         type: boolean
         default: false
+  # 兜底用，别指望它准点：实测迟 6 小时、11-16 直接丢了一次。
+  # 真正准点的触发是青龙 id=229（`task gh_dispatch_sync.py`，cron `0 10 8 * * *`）。
+  # 青龙跑过之后，这里迟到的 run 会被 Guard 判「今天已同步过」直接跳过。
   schedule:
     - cron: '10 8 * * *'
       timezone: 'Asia/Shanghai'
