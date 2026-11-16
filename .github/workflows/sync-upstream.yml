@@ -3,11 +3,11 @@ name: sync upstream
 # 把上游 Devilstore/Glados-Railgun-checkin 的更新合进来。
 #
 # 触发方式：
-#   1. 每天北京 08:10 由青龙 id=229 跑 `task gh_dispatch_sync.py` → dispatch 本文件
+#   1. 每天北京 00:00 由青龙 id=229 跑 `task gh_dispatch_sync.py` → dispatch 本文件
 #      （**主触发器**，见下方「为什么不靠 GitHub schedule」）
 #   2. custom-checkin 判定签到失败 / 积分异常时自动触发（reason=checkin-abnormal）
 #   3. 手动 Run workflow
-#   4. GitHub 自带 schedule（08:10）保留为兜底 —— 青龙挂了才轮到它
+#   4. GitHub 自带 schedule（北京 00:20）保留为兜底 —— 青龙挂了才轮到它
 #
 # 为什么不靠 GitHub schedule（2026-11-16 实测，北京时间取自 API 的 created_at）：
 #   应 08:10 → 11-12 15:01 · 11-13 14:30 · 11-14 14:08 · 11-15 14:16
@@ -17,7 +17,8 @@ name: sync upstream
 #   所以主触发权收到青龙，schedule 只当「青龙死了」的最后兜底 —— Guard 会挡掉重复。
 #
 # 行为：
-#   * 上游有新提交 → merge 后 push（push 会触发 custom-checkin 重跑一次签到）
+#   * 上游有新提交 → merge 后 push（签到**不再**自动触发，见 Trigger checkin 那步的注释；
+#                    需要立刻验证时手动跑并勾 `dispatch_checkin`）
 #   * 上游没更新   → 什么都不做，等明天（日志里的「上游领先 0 个提交」就是这条，
 #                    不代表失败 —— 说明之前已经合过了）
 #   * 合并冲突     → 中止并推送告警，等你人工处理（不会留半成品）
@@ -45,11 +46,16 @@ on:
         description: '忽略「今天已同步过」的守卫，强制再检查一次'
         type: boolean
         default: false
+      dispatch_checkin:
+        description: '合并后立刻触发一次签到（默认关：定时同步在凌晨 0 点，那时签到可能还没跨天）'
+        type: boolean
+        default: false
   # 兜底用，别指望它准点：实测迟 6 小时、11-16 直接丢了一次。
-  # 真正准点的触发是青龙 id=229（`task gh_dispatch_sync.py`，cron `0 10 8 * * *`）。
+  # 真正准点的触发是青龙 id=229（`task gh_dispatch_sync.py`，cron `0 0 0 * * *`）。
+  # 兜底跟着挪到 00:20 —— 即便再迟 6 小时，也大概率落在 08:40 签到之前。
   # 青龙跑过之后，这里迟到的 run 会被 Guard 判「今天已同步过」直接跳过。
   schedule:
-    - cron: '10 8 * * *'
+    - cron: '20 0 * * *'
       timezone: 'Asia/Shanghai'
 
 concurrency:
@@ -181,8 +187,12 @@ jobs:
           exit 1
 
       # custom-checkin 不再挂 on: push，所以这里显式触发一次，用新代码签到
+      # 默认**不**触发签到。定时同步在凌晨 00:00，那个点 GLaDOS 的日签是否已经
+      # 跨天不确定：万一判成「重复签到」，08:40 的青龙任务会因为「今天已跑过」
+      # 而 skip，等于当天漏签。所以改成手动勾 `dispatch_checkin` 才触发，
+      # 定时同步只对齐代码，08:40 照常签。
       - name: Trigger checkin with new code
-        if: steps.merge.outputs.merged == 'true'
+        if: steps.merge.outputs.merged == 'true' && github.event.inputs.dispatch_checkin == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
