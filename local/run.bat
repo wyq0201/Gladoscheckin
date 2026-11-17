@@ -18,4 +18,9 @@ echo ===== %date% %time% ===== >> "%LOG%"
 set "RC=%ERRORLEVEL%"
 echo === exit %RC% === >> "%LOG%"
 
+rem Push an alert on failure so unattended runs do not fail silently.
+if not "%RC%"=="0" (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0notify.ps1" -Code %RC% -Log "%LOG%"
+)
+
 exit /b %RC%
