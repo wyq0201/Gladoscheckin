@@ -9,18 +9,20 @@ rem under the OEM codepage.
 cd /d "%~dp0"
 chcp 65001 >nul
 
+set "NODE=C:\Users\wyq\.workbuddy\binaries\node\versions\22.22.2-6\node.exe"
+if not exist "%NODE%" set "NODE=node"
+
 if not exist logs mkdir logs
 for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd"') do set "D=%%i"
 set "LOG=logs\checkin-%D%.log"
 
 echo ===== %date% %time% ===== >> "%LOG%"
-"C:\Users\wyq\.workbuddy\binaries\node\versions\22.22.2-6\node.exe" checkin.mjs %* >> "%LOG%" 2>&1
+"%NODE%" checkin.mjs %* >> "%LOG%" 2>&1
 set "RC=%ERRORLEVEL%"
 echo === exit %RC% === >> "%LOG%"
 
 rem Push an alert on failure so unattended runs do not fail silently.
-if not "%RC%"=="0" (
-  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0notify.ps1" -Code %RC% -Log "%LOG%"
-)
+rem notify.mjs prints nothing on success (exit 0), so normal days stay quiet.
+if not "%RC%"=="0" "%NODE%" notify.mjs %RC% "%LOG%" >> "%LOG%" 2>&1
 
 exit /b %RC%
