@@ -19,18 +19,24 @@ custom_run.py
 
 workflow 里跑 `python custom_run.py`，不直接跑 `checkin.py`。
 
-## 四个 workflow 的分工
+## 现在的分工（2026-11-17 起签到已迁到本机）
 
-| workflow | 文件 | 触发 | 干什么 |
+| 谁 | 在哪 | 触发 | 干什么 |
 |---|---|---|---|
-| **glados checkin** | `custom-checkin.yml` | **青龙面板 08:40** dispatch、手动 | 跑 `custom_run.py` 签到 + PushPlus 推送 |
-| **sync upstream** | `sync-upstream.yml` | **青龙面板 00:00（主）**、GitHub schedule（兜底）、手动、被签到调用 | 拉上游；有更新就 merge+push，没更新就空转等明天（**不再自动触发签到**） |
-| **glados watchdog** | `watchdog.yml` | 北京 **16:00 / 19:00** | 只在「今天压根没跑」时兜底触发签到 |
-| ~~GLaDOS Check-in~~ | `gladosCheck.yml` | — | 上游自带，**已手动 disable**，避免重复签到 |
+| **本机签到** | `local/checkin.mjs` | Windows 计划任务 `GLaDOS Checkin`，每天 **08:40** | **唯一的签到入口**：真 Chrome 打开 `/console/checkin` → 等 Turnstile → 点按钮 |
+| **sync upstream** | `sync-upstream.yml` | **青龙面板 00:00（主）**、GitHub schedule（兜底）、手动 | 拉上游；有更新就 merge+push（不签到） |
+| ~~glados checkin~~ | `custom-checkin.yml` | — | **已 disabled**。纯 Python 路线（见下方「为什么搬走」） |
+| ~~glados watchdog~~ | `watchdog.yml` | — | **已 disabled**，职责被本机计划任务接走 |
+| ~~GLaDOS Check-in~~ | `gladosCheck.yml` | — | 上游自带，早就 disabled |
+
+> 为什么签到搬走：2026-11-14 起 GLaDOS 给 `POST /api/user/checkin` 加了 Cloudflare
+> Turnstile（interaction-only，后台/无头都不下发 token）。Actions 的 Azure 机房 IP
+> 会被强制交互式挑战，纯 HTTP 一律 `code=5 Cloudflare verification failed`。
+> 同一台机器上用真浏览器，Turnstile 静默通过 —— 实测 `code=0/+2 分`、`code=1 已签到` 都正常。
+> 详见 `local/checkin.mjs` 顶部注释与当日工作日志。
 
 > ⚠️ `custom-checkin.yml` **刻意不挂 `on: push`**。
 > 否则每次改代码都会签一次，白白产生一堆「重复签到」的空跑。
-> 需要验证新代码时：sync 合并后会自己 dispatch，或者手动 Run workflow。
 
 ### 为什么不用 GitHub 自带的 schedule（2026-11-11）
 
@@ -76,6 +82,12 @@ schedule 降级为兜底并同步挪到 00:20**（留着是因为青龙万一挂
 
 青龙的 `RandomDelay="300"` **只作用于 .js 任务**，`.py` 准点执行，不受影响。
 
+> **2026-11-17 更新：id=227 这个任务已经删了。** 签到整体搬到本机真浏览器后，
+> 它没有存在意义（调起来也只会得到 `code=5`）。要恢复 Actions 路线的话：
+> 1. GitHub 上把 `custom-checkin.yml` 重新 enable
+> 2. 青龙新建任务：`task gh_dispatch.py`，cron `0 40 8 * * *`
+> 3. 但**纯 Python 路线在 Turnstile 面前是死的**，恢复它大概率只是恢复一条必失败链路。
+
 ### 同一套脚本也接了 sync upstream（id=229，2026-11-16）
 
 就是上面那张表里的 08:10 那一环（2026-11-16 已挪到 **00:00**），改用同一份 `gh_dispatch.py` 逻辑：
@@ -119,30 +131,24 @@ Unrecognized switch: --repo  (-h will show valid options)
 所以青龙上不能带命令行参数。wrapper 把配置塞进环境变量（`DISPATCH_REPO` 等）
 再调 `gh_dispatch.main()`；`gh_dispatch.py` 的 argparse 默认值都从这些环境变量读。
 
-> ⚠️ 青龙容器重建后必须恢复：`gh_dispatch.py`、`gh_dispatch_sync.py`、
-> `gh_dispatch_pojie52.py` 回到 `/ql/scripts/`、id=227/229/228 任务还在、
-> `GH_DISPATCH_TOKEN` 还在。
-> 否则签到退化成只剩 GitHub 侧那两次兜底，同步退化成只剩 schedule（等于随机）。
+> ⚠️ 青龙容器重建后必须恢复：`gh_dispatch_sync.py`、`gh_dispatch_pojie52.py`
+> 回到 `/ql/scripts/`、id=229 / 228 任务还在、`GH_DISPATCH_TOKEN` 还在。
+> （`gh_dispatch.py` 和 id=227 已随签到迁走一并删除，容器重建后不用再补。）
+> 否则同步退化成只剩 GitHub schedule（等于随机）。
 
-## 一天到底签几次、推几条
+## 一天到底签几次
 
-**正常情况：签 1 次、推 1 条**（青龙 08:40 dispatch 那次）。
+**现在只有一条路径：本机计划任务 08:40 跑一次。**
 
-| 场景 | 签到次数 | 推送条数 |
-|---|---|---|
-| 一切正常 | 1（青龙 08:40 dispatch） | 1（签到成功） |
-| 青龙没触发（容器挂了/任务被删） | 1（16:00 或 19:00 watchdog 补） | 1 + 青龙侧告警 |
-| 上游有更新 | 1（00:00 同步不签，08:40 照常签一次） | 1（签到成功） |
-| 签到失败 / 积分异常 | 1（只会再拉一次上游代码，不会重签） | 1 + 1 条异常告警 |
-| 手动点 Run workflow（当天已签） | 多一次空跑 | **0**（重复签到不推） |
+| 场景 | 结果 |
+|---|---|
+| 一切正常 | 签 1 次，`code=0` +N 分，写日志 |
+| 今天已经签过 | 先查 `/api/user/points` 命中今天记录 → 直接退出 0，**不点按钮** |
+| profile 失效 | 退出码 2，日志提示重跑 `node checkin.mjs --login` |
+| Turnstile 没过 | 退出码 1，日志 `code=5` |
 
-**三条去噪规则**：
-
-1. **全部「重复签到」不推送** —— 今天早签过了，再推没有新信息
-2. **watchdog 只在 16:00–23:00 兜底，一天两次** —— 早先铺了 11:00–22:00 每小时（12 次），
-   但 GitHub 对这些高频档丢得厉害（11-10 只落 1 次，还落在 18:29 UTC），
-   铺宽没换来命中率，只把可能重复签到的时间段拉长了
-3. **push 不触发签到** —— 见上方说明
+不再有推送 —— Actions 那条链路已停，结果只看 `local\logs\checkin-YYYYMMDD.log`。
+需要推送就在 `checkin.mjs` 末尾加一个 PushPlus 调用，脚本结构留了位置。
 
 ## 自动拉上游的逻辑
 
@@ -154,10 +160,10 @@ Unrecognized switch: --repo  (-h will show valid options)
          │                   └─ 签到不跟着触发（勾了 dispatch_checkin 才触发）
          └─ 合并冲突 → git merge --abort，推送告警，等你人工处理
 
-08:40  青龙 gh_dispatch.py → dispatch glados checkin
-         ├─ 今天已跑过 → 直接跳过（幂等）
-         ├─ 正常 → 退出码 0，推送报告
-         └─ 异常 → 退出码 1（job 变红）+ 告警推送 + 自动触发 sync upstream
+08:40  本机计划任务 "GLaDOS Checkin" → local/run.bat → checkin.mjs
+         ├─ 已登录？否 → 退出码 2，日志提示 --login
+         ├─ 今天已签？是 → 直接退出 0（不点按钮）
+         └─ 否则点按钮，按响应判 code=0 成功 / code=1 已签 / code=5 Turnstile 未过
 ```
 
 ### ⚠️ 为什么同步要用 SYNC_TOKEN 而不是 GITHUB_TOKEN
@@ -217,8 +223,11 @@ Unrecognized switch: --repo  (-h will show valid options)
 
 | 现象 | 先看哪里 |
 |---|---|
-| 今天没收到推送 | 青龙 id=227 的日志（有没有 dispatch 成功）；再查 Actions → `glados checkin`；最后看 watchdog 16:00/19:00 |
-| 推送说「签到失败」 | 日志里 8 个域名是否全 `code=-2` → Cookie 失效，重新登录取新 Cookie |
+| 今天没签到 | 本机 `local\logs\checkin-YYYYMMDD.log`（最新一份）；再看计划任务 `GLaDOS Checkin` 上次运行结果 |
+| 本机日志报 `code=5` | Turnstile 没过。检查任务是否在「用户已登录」会话里跑、窗口有没有真的渲染出来 |
+| 本机日志报「未登录」 | profile 失效，重跑 `node checkin.mjs --login` 登录一次 |
+| 本机没有任何日志 | 计划任务没跑：`schtasks /query /tn "GLaDOS Checkin"` 看上次运行时间与返回码 |
+| 推送说「签到失败」（旧 Actions 路线） | 日志里 8 个域名是否全 `code=-2` → Cookie 失效，重新登录取新 Cookie |
 | 推送说「积分异常」 | 上游可能又加了新校验 → 看 `sync upstream` 是否拉到新代码 |
 | job 变红 | 点进去看 `Running checkin` 步骤的日志，异常项会打在最下面 |
 | 同步冲突 | 说明上游改了我们也改过的文件（理论上不会发生），需要人工 merge |
