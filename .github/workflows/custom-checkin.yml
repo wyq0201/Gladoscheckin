@@ -1,5 +1,8 @@
 name: glados checkin
 
+# 【2026-11-17 停用】签到改跑本机真浏览器（Playwright + 系统 Chrome），
+# workflow 已 disable，青龙 id=227 也已删除。本文件保留仅为考古与应急手动跑。
+#
 # 本仓库的签到入口（上游自带的 gladosCheck.yml 已在仓库里 disable，避免重复签）
 # 与上游的区别只有三处：
 #   1. 跑 custom_run.py 而不是 checkin.py（定制全在包装层，上游文件保持原样）

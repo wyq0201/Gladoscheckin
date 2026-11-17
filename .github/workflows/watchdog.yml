@@ -1,6 +1,12 @@
 name: glados watchdog
 
-# 只干一件事：今天彻底没跑（定时被 GitHub 丢了/延迟到快过期）时，兜底手动触发一次签到。
+# 【2026-11-17 废弃】签到已迁出 GitHub Actions / 青龙，改跑本机真浏览器
+# （E:\workspace\my_script\Gladoscheckin\local\checkin.mjs + Windows 计划任务
+#  "GLaDOS Checkin" 每日 08:40）。本 workflow 与 custom-checkin 均已
+#  disable，schedule 也已移除，只剩 workflow_dispatch 供考古/应急。
+#
+# 历史职责（已失效）：今天彻底没跑（定时被 GitHub 丢了/延迟到快过期）时，
+# 兜底手动触发一次签到。
 #
 # 注意边界：
 #   * 签到失败 / 积分异常 → 由 custom-checkin 自己触发 sync-upstream，这里不插手，
@@ -18,17 +24,8 @@ on:
         description: '测试用：只打印将要执行的动作，不真正触发签到'
         type: boolean
         default: false
-  schedule:
-    # 北京时间 16:00 / 19:00（UTC 08:00 / 11:00），一天只两次。
-    #
-    # 2026-11-11 收紧：原来是 `0 3-14 * * *`（北京 11:00-22:00，共 12 次），
-    # 但实测 GitHub 对这个仓库的 schedule 严重降级 —— 11-10 那天 12 次只跑了 1 次，
-    # 而且落地在 18:29 UTC（比区间末尾还晚 4.5 小时）。铺宽既没提高命中率，
-    # 又拉长了一天里可能重复签到的时间段。所以改成两个点，且都排在主任务之后。
-    #
-    # 现在主任务由青龙 08:40 精确定时 dispatch（见 custom-checkin.yml 顶部说明），
-    # 这里只是「青龙挂了 / 触发失败」的最后一道兜底。
-    - cron: '0 8,11 * * *'
+  # schedule 已于 2026-11-17 移除：签到不再走 Actions，兜底没有意义。
+  # 原配置为 `0 8,11 * * *`（北京 16:00 / 19:00）。
 
 permissions:
   actions: write
