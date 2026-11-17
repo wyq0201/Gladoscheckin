@@ -1,0 +1,14 @@
+{
+  "name": "glados-local-checkin",
+  "private": true,
+  "type": "module",
+  "description": "本机真浏览器签到（绕过 Cloudflare Turnstile），替代 Actions 上的纯 Python 版",
+  "scripts": {
+    "login": "node checkin.mjs --login",
+    "checkin": "node checkin.mjs",
+    "checkin:headless": "node checkin.mjs --headless"
+  },
+  "dependencies": {
+    "playwright": "^1.51.0"
+  }
+}

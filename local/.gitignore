@@ -1,0 +1,4 @@
+# 本机跑的，profile 里是登录态，绝不入库
+profile/
+node_modules/
+*.log
