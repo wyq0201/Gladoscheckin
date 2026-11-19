@@ -237,7 +237,10 @@ async function clickAndJudge(page, btn) {
     return 0;
   }
   if (code === 0) {
-    const pts = data?.data?.change ?? data?.change ?? '?';
+    // 新协议的 data 里常常没有 change，分数只出现在 message："Checkin! Got 2 Points"
+    const pts = data?.data?.change ?? data?.change
+      ?? (msg.match(/Got\s+(\d+)\s+Point/i)?.[1])
+      ?? '?';
     log(`✅ 签到成功，本次 +${pts} 积分`);
     return 0;
   }
