@@ -2,3 +2,5 @@
 profile/
 node_modules/
 *.log
+# 一次性只读探针
+probe-plan.mjs
