@@ -74,10 +74,10 @@ Actions 版是纯 HTTP 请求，**无法通过 Cloudflare Turnstile**。如果�
 
 ### 版本
 
-当前版本：`1.1.5`。
+当前版本：`1.1.7`。
 
 - `extension/` 目录始终是**最新源码**，适合开发者和本地加载；
-- 发布包按版本号命名，例如 `glados-checkin-extension-v1.1.5.zip`；
+- 发布包按版本号命名，例如 `glados-checkin-extension-v1.1.7.zip`；
 - 加载目录不变时扩展 ID 不变，账号数据保留；
 - 不要把 `latest` 当成唯一文件名；以 GitHub Releases 的 **Latest** 为准，版本化包便于回退和排查。
 
@@ -388,6 +388,15 @@ Windows PowerShell 用 `$env:GLADOS_COOKIES='[...]'`。
 - 推送兼容 Server酱。
 
 **2026-11**
+
+**1.1.7**
+
+- 修复 v1.1.6 引入的在线更新回归：写入预检把真实浏览器对已存在文件的 `TypeMismatchError` 误当成异常抛出，导致更新报 `The path supplied exists, but was not an entry of requested type.`；测试 mock 同步模拟真实 API 的类型错误行为。
+
+**1.1.6**
+
+- 全面代码审查修复（30 项）：更新器增加解压体积上限、4 段版本号、更稳的目录剥离与写入预检；修复双击更新竞态、并发写账号覆盖签到结果、SW 保活与会话状态丢失、订阅表单被后台刷新清空等；
+- 修复 Server酱 URL 拼接、停留时间上限、更新检查文案与实测不一致等问题。
 
 **1.1.5**
 
