@@ -21,8 +21,8 @@ echo ===== %date% %time% ===== >> "%LOG%"
 set "RC=%ERRORLEVEL%"
 echo === exit %RC% === >> "%LOG%"
 
-rem Push an alert on failure so unattended runs do not fail silently.
-rem notify.mjs prints nothing on success (exit 0), so normal days stay quiet.
-if not "%RC%"=="0" "%NODE%" notify.mjs %RC% "%LOG%" >> "%LOG%" 2>&1
+rem Daily report: push every run, success or failure. --daily makes the
+rem success path non-silent and fills the body with today's points.
+"%NODE%" notify.mjs %RC% "%LOG%" --daily >> "%LOG%" 2>&1
 
 exit /b %RC%

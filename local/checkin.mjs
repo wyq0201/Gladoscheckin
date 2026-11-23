@@ -29,6 +29,9 @@ const PROFILE = path.join(HERE, 'profile');
 const DOMAIN = process.env.GLADOS_DOMAIN || 'glados.cloud';
 const HEADLESS = process.argv.includes('--headless');
 const LOGIN_ONLY = process.argv.includes('--login');
+// 浏览器通道：本机默认 chrome；云电脑只装了 Edge 时用 GLA_CHANNEL=msedge。
+// Turnstile 认指纹，Edge/Chrome 都是真实浏览器，都能过；bundled chromium 不行。
+const CHANNEL = process.env.GLA_CHANNEL || 'chrome';
 const MIN_STAY = 3000;   // 官网要求 challenge 至少 2.5 秒后才提交
 
 const TZ = (d = new Date()) =>
@@ -53,7 +56,7 @@ async function main() {
 
   const ctx = await chromium.launchPersistentContext(PROFILE, {
     headless: HEADLESS,
-    channel: 'chrome',                 // 用系统 Chrome，指纹比 bundled chromium 自然
+    channel: CHANNEL,                  // 用系统 Chrome/Edge，指纹比 bundled chromium 自然
     locale: 'zh-CN',
     timezoneId: 'Asia/Shanghai',
     viewport: { width: 1400, height: 900 },
