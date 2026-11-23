@@ -71,7 +71,7 @@ async function main() {
 
     // 登录态 + 今日签到状态：用 /api/user/status + /api/user/points 判，
     // 比看 URL 和按钮文案都稳（console 是 SPA，未登录不跳 URL；按钮文案有延迟）。
-    const snap = await readSnapshot(page);
+    const snap = await readSnapshotSafe(page);
     log(`登录态：HTTP ${snap.statusCode ?? '?'} ${snap.loggedIn ? '已登录' : '未登录'}` +
         (snap.loggedIn ? ` · 剩余 ${snap.leftDays ?? '?'} 天 · 总 ${snap.points ?? '?'} 分` : ''));
 
@@ -175,6 +175,28 @@ async function readSnapshot(page) {
   });
 }
 
+// readSnapshot 的容错壳：SPA 首屏导航会打断 in-page fetch 的 evaluate，
+// 报 "Execution context was destroyed"。这属于时序问题，不是签到失败，
+// 等页面落定后重试即可（2026-11-20 那次漏签就是栽在这里）。
+const NAV_BROKEN = /Execution context was destroyed|Target closed|frame was detached|Cannot find context|navigat(ing|ion)/i;
+
+async function readSnapshotSafe(page, attempts = 3) {
+  let lastErr = null;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      return await readSnapshot(page);
+    } catch (e) {
+      lastErr = e;
+      const msg = String((e && e.message) || e);
+      if (!NAV_BROKEN.test(msg)) throw e;
+      log(`读取账号快照被页面导航打断（${i}/${attempts}）：${msg.split('\n')[0]}`);
+      await page.waitForLoadState('domcontentloaded', { timeout: 15_000 }).catch(() => {});
+      await sleep(800 * i);
+    }
+  }
+  throw lastErr;
+}
+
 async function clickAndJudge(page, btn) {
   const cls = (await btn.getAttribute('class')) || '';
   const text = ((await btn.innerText()) || '').trim();
@@ -206,7 +228,7 @@ async function clickAndJudge(page, btn) {
     // 没抓到请求：可能已签过（页面不再发请求），或点击没落到按钮上。
     // 优先信服务端流水，其次看按钮文案，都不成立才报失败。
     await sleep(2500);
-    const snap = await readSnapshot(page).catch(() => null);
+    const snap = await readSnapshotSafe(page).catch(() => null);
     if (snap && snap.todayPoints != null) {
       log(`今日已签到（${snap.todayKey} 入账 ${snap.todayPoints} 分）`);
       return 0;
